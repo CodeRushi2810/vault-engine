@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  vault-engine:
+    build: .
+    container_name: vault-engine
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

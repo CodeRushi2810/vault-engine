@@ -1,0 +1,6 @@
+pandas
+growwapi
+python-dotenv
+
+colorlog
+google-genai
