@@ -33,7 +33,7 @@ def generate_previous_close():
     
     try:
         close_prices = get_previous_close_prices()
-        json_path = os.path.join(BASE_DIR, "dashboard", "public", "dashboard_data.json")
+        json_path = os.path.join(BASE_DIR, "data", "dashboard_data.json")
         
         data = {"trades": []}
         if os.path.exists(json_path):

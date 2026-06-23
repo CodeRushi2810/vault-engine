@@ -15,6 +15,7 @@ from backtesting.state_machine_engine import StateMachineEngine
 from backtesting.strategies import get_all_strategies
 from backtesting.features import compute_features
 from core.run_pipeline import generate_report
+from core.fetch_data import get_groww_history
 
 from core.system_logger import setup_logger
 from core.config import STOCK_TOKENS, TOKEN_TO_STOCK
@@ -54,19 +55,18 @@ class LiveExecutionEngine:
         candles_dict = {}
         for stock in self.stocks:
             try:
-                res = self.groww.get_historical_candles('NSE', 'CASH', f'NSE-{stock}', start_str, end_str, GrowwAPI.CANDLE_INTERVAL_MIN_15)
-                if res and 'candles' in res:
-                    for c in res['candles']:
-                        ts_str = c[0].replace('T', ' ')
-                        if ts_str == start_str:
-                            candles_dict[stock] = {
-                                'open': float(c[1] or c[4]),
-                                'high': float(c[2] or c[4]),
-                                'low': float(c[3] or c[4]),
-                                'close': float(c[4]),
-                                'volume': float(c[5] or 0)
-                            }
-                            break
+                df = get_groww_history(self.groww, stock, GrowwAPI.CANDLE_INTERVAL_MIN_15, start_dt, end_dt)
+                if not df.empty:
+                    match = df[df['Timestamp'] == pd.to_datetime(start_str)]
+                    if not match.empty:
+                        c = match.iloc[0]
+                        candles_dict[stock] = {
+                            'open': float(c['Open']),
+                            'high': float(c['High']),
+                            'low': float(c['Low']),
+                            'close': float(c['Close']),
+                            'volume': float(c['Volume'])
+                        }
             except:
                 pass
         return candles_dict
@@ -184,41 +184,33 @@ class LiveExecutionEngine:
                 
                 last_csv_ts = df['Timestamp'].max()
                 
-                # If there's a gap between the CSV and reality
-                if last_csv_ts < latest_possible_candle:
-                    logger.info(f"[{stock}] Missing data detected. Last CSV: {last_csv_ts}. Catching up to: {latest_possible_candle}")
+                # We want to perform a robust UPSERT to fill any historical holes (e.g. from mid-day network drops) 
+                # as well as append any new missing candles at the end.
+                fetch_start = now - datetime.timedelta(days=3)
+                
+                # Fetch recent history (using the patched 5m-to-15m aggregation)
+                df_new = get_groww_history(self.groww, stock, GrowwAPI.CANDLE_INTERVAL_MIN_15, fetch_start, now)
+                
+                if not df_new.empty:
+                    df_new['Timestamp'] = pd.to_datetime(df_new['Timestamp'])
                     
-                    # Fetch from exactly one minute after the last CSV timestamp to the current time
-                    fetch_start = last_csv_ts + datetime.timedelta(minutes=1)
-                    fetch_start_str = fetch_start.strftime('%Y-%m-%d %H:%M:%S')
-                    fetch_end_str = now.strftime('%Y-%m-%d %H:%M:%S')
+                    # Filter out any candles that haven't finalized yet
+                    df_new = df_new[df_new['Timestamp'] <= latest_possible_candle]
                     
-                    res = self.groww.get_historical_candles('NSE', 'CASH', f'NSE-{stock}', fetch_start_str, fetch_end_str, GrowwAPI.CANDLE_INTERVAL_MIN_15)
-                    
-                    if res and 'candles' in res:
-                        new_rows = []
-                        for c in res['candles']:
-                            ts_str = c[0].replace('T', ' ')
-                            c_ts = pd.to_datetime(ts_str)
-                            
-                            # Only accept candles strictly after what we already have, up to the last finalized one
-                            if c_ts > last_csv_ts and c_ts <= latest_possible_candle:
-                                new_rows.append({
-                                    'Timestamp': c_ts,
-                                    'Open': float(c[1] or c[4]),
-                                    'High': float(c[2] or c[4]),
-                                    'Low': float(c[3] or c[4]),
-                                    'Close': float(c[4]),
-                                    'Volume': float(c[5] or 0)
-                                })
+                    if not df_new.empty:
+                        initial_len = len(df)
+                        # Enterprise-grade UPSERT: Concatenate, drop duplicates keeping the newly fetched data
+                        combined_df = pd.concat([df, df_new], ignore_index=True)
+                        combined_df.drop_duplicates(subset=['Timestamp'], keep='last', inplace=True)
+                        combined_df.sort_values(by='Timestamp', inplace=True)
                         
-                        if new_rows:
-                            new_df = pd.DataFrame(new_rows)
-                            df = pd.concat([df, new_df], ignore_index=True)
-                            df = df.sort_values(by='Timestamp')
-                            df['Timestamp'] = df['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                            df.to_csv(csv_path, index=False)
-                            logger.info(f"[{stock}] Successfully caught up {len(new_rows)} missing candles.")
+                        final_len = len(combined_df)
+                        added_count = final_len - initial_len
+                        
+                        if added_count > 0 or not df.equals(combined_df):
+                            combined_df['Timestamp'] = combined_df['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                            combined_df.to_csv(csv_path, index=False)
+                            logger.info(f"[{stock}] Synced data. Inserted/Updated {len(df_new)} recent candles to fill gaps.")
             except Exception as e:
                 pass # Silently fail on connection errors during catch-up
         logger.info("Auto Catch-Up Sequence Complete.\n")

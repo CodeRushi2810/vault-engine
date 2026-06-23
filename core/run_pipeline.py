@@ -26,7 +26,7 @@ def generate_report():
         return
         
     # Export JSON for the Next.js Dashboard
-    json_path = os.path.join(BASE_DIR, "dashboard", "public", "dashboard_data.json")
+    json_path = os.path.join(BASE_DIR, "data", "dashboard_data.json")
     if os.path.exists(os.path.dirname(json_path)):
         import json
         

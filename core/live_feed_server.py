@@ -3,6 +3,7 @@ import json
 import threading
 import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, Response
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -34,6 +35,41 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+@app.get("/api/dashboard_data")
+async def get_dashboard_data():
+    json_path = os.path.join(BASE_DIR, "data", "dashboard_data.json")
+    if os.path.exists(json_path):
+        with open(json_path, 'r') as f:
+            return JSONResponse(content=json.load(f))
+    return JSONResponse(content={"trades": []})
+
+@app.get("/api/news_data")
+async def get_news_data():
+    json_path = os.path.join(BASE_DIR, "data", "news_data.json")
+    if os.path.exists(json_path):
+        with open(json_path, 'r') as f:
+            return JSONResponse(content=json.load(f))
+    return JSONResponse(content=[])
+
+@app.get("/api/notifications")
+async def get_notifications():
+    csv_path = os.path.join(BASE_DIR, "data", "notification_state.csv")
+    if os.path.exists(csv_path):
+        with open(csv_path, 'r') as f:
+            return Response(content=f.read(), media_type="text/csv")
+    return Response(content="Key,Value\n", media_type="text/csv")
+
+from fastapi import Request
+@app.post("/api/notifications")
+async def post_notifications(request: Request):
+    csv_path = os.path.join(BASE_DIR, "data", "notification_state.csv")
+    content = await request.body()
+    with open(csv_path, 'wb') as f:
+        f.write(content)
+    return JSONResponse(content={"status": "success"})
 
 class ConnectionManager:
     def __init__(self):

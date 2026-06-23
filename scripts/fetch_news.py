@@ -128,7 +128,7 @@ def main():
         except Exception as e:
             print(f"Gemini API failed: {e}")
 
-    out_path = os.path.join(BASE_DIR, "dashboard", "public", "news_data.json")
+    out_path = os.path.join(BASE_DIR, "data", "news_data.json")
     with open(out_path, 'w') as f:
         json.dump(news_data_output, f, indent=4)
     print(f"\nSuccessfully saved consolidated news data to {out_path}")

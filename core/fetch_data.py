@@ -57,13 +57,16 @@ def get_groww_history(groww, stock_name, interval_constant, start_time, end_time
         end_str = current_end.strftime('%Y-%m-%d %H:%M:%S')
         
         try:
+            # BUG FIX: Groww's 15m API skips 10:30, 12:30, etc. We must fetch 5m candles and aggregate them.
+            actual_interval = groww.CANDLE_INTERVAL_MIN_5 if interval_constant == groww.CANDLE_INTERVAL_MIN_15 else interval_constant
+            
             response = groww.get_historical_candles(
                 exchange=groww.EXCHANGE_NSE,
                 segment=groww.SEGMENT_CASH,
                 groww_symbol=f"NSE-{stock_name}",
                 start_time=start_str,
                 end_time=end_str,
-                candle_interval=interval_constant
+                candle_interval=actual_interval
             )
             
             candles = response.get("candles", [])
@@ -86,6 +89,19 @@ def get_groww_history(groww, stock_name, interval_constant, start_time, end_time
     # Drop any potential overlaps from chunking
     df.drop_duplicates(subset=['Timestamp'], inplace=True)
     df.sort_values('Timestamp', inplace=True)
+    
+    if interval_constant == groww.CANDLE_INTERVAL_MIN_15 and not df.empty:
+        # Resample 5m to 15m
+        df.set_index('Timestamp', inplace=True)
+        resampled = df.resample('15min').agg({
+            'Open': 'first',
+            'High': 'max',
+            'Low': 'min',
+            'Close': 'last',
+            'Volume': 'sum'
+        }).dropna()
+        resampled.reset_index(inplace=True)
+        df = resampled
     
     return df
 
