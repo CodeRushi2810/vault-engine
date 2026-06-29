@@ -37,9 +37,8 @@ class LiveExecutionEngine:
         self.tokens = TOKEN_TO_STOCK
         self.stocks = list(self.tokens.values())
         
-        API_KEY = os.getenv('GROWW_API_KEY')
-        API_SECRET = os.getenv('GROWW_API_SECRET')
-        token = GrowwAPI.get_access_token(api_key=API_KEY, secret=API_SECRET)
+        from core.auth import get_groww_token
+        token = get_groww_token()
         self.groww = GrowwAPI(token)
         
         self.scheduler = AsyncIOScheduler()

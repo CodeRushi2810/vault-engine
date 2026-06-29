@@ -8,6 +8,7 @@ import websockets
 import asyncio
 import threading
 import contextlib
+import sys
 
 from core.market_utils import is_market_open, get_market_status
 from core.data_utils import get_previous_close_prices
@@ -112,34 +113,44 @@ def main():
         time.sleep(5)
     logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Internet connection verified.")
     
-    API_KEY = os.getenv('GROWW_API_KEY')
-    API_SECRET = os.getenv('GROWW_API_SECRET')
-    if API_KEY and API_SECRET:
-        with contextlib.redirect_stdout(open(os.devnull, 'w')):
-            try:
-                token = GrowwAPI.get_access_token(api_key=API_KEY, secret=API_SECRET)
-                os.environ['GROWW_TOKEN'] = token
-                logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Authenticated with Groww API. Session Token Cached.")
-            except Exception as e:
-                logger.error(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Groww API Auth Failed: {e}")
-    else:
-        logger.error(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Missing GROWW_API_KEY or GROWW_API_SECRET in .env!")
+    from core.auth import get_groww_token
+    try:
+        token = get_groww_token()
+        logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Authenticated with Groww API. Session Token Cached.")
+    except Exception as e:
+        logger.error(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Groww API Auth Failed: {e}")
     
     # Pre-generate static previous close prices for the UI
     generate_previous_close()
     
+    def start_and_wait(command, ready_strings):
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        ready_event = threading.Event()
+        
+        def output_reader():
+            for line in process.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                for rs in ready_strings:
+                    if rs in line:
+                        ready_event.set()
+                        
+        threading.Thread(target=output_reader, daemon=True).start()
+        ready_event.wait(timeout=15)
+        return process
+
     # 1. Start live_engine.py unconditionally (it handles orders and runs continuously)
     logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting core/live_engine.py...")
-    engine_process = subprocess.Popen(["python", "-m", "core.live_engine"])
+    engine_process = start_and_wait(["python", "-m", "core.live_engine"], ["Starting Execution Engine Pipeline"])
     
     logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting background WebSocket Heartbeat server on port 8001...")
     heartbeat_thread = threading.Thread(target=run_heartbeat_server, daemon=True)
     heartbeat_thread.start()
     
-    feed_process = subprocess.Popen(["python", "-m", "core.live_feed_server"])
+    feed_process = start_and_wait(["python", "-m", "core.live_feed_server"], ["Ready to Groww!", "Bypassing Live Feed subscriptions"])
     
     logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting background Discord listener (core/discord_listener.py)...")
-    discord_process = subprocess.Popen(["python", "-m", "core.discord_listener"])
+    discord_process = start_and_wait(["python", "-m", "core.discord_listener"], ["Synced", "Logged in as"])
     
     market_state = get_market_status()
     

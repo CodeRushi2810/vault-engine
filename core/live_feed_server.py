@@ -259,21 +259,11 @@ def poll_agents():
         time.sleep(1)
 
 def start_groww_feed():
-    load_dotenv()
-    API_KEY = os.getenv("GROWW_API_KEY")
-    API_SECRET = os.getenv("GROWW_API_SECRET")
-    
-    if not API_KEY or not API_SECRET:
-        logger.info("Missing API credentials in .env")
-        return
-        
     try:
         logger.info("Initializing Live Feed Server with shared Token...")
         
-        access_token = os.environ.get('GROWW_TOKEN')
-        if not access_token:
-            logger.info("Fallback: Re-authenticating with Groww...")
-            access_token = GrowwAPI.get_access_token(api_key=API_KEY, secret=API_SECRET)
+        from core.auth import get_groww_token
+        access_token = get_groww_token()
             
         import contextlib
         with contextlib.redirect_stdout(open(os.devnull, 'w')):

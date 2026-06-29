@@ -15,28 +15,21 @@ def get_previous_close_prices():
     
     # PRIMARY SOURCE: Groww API (100% accurate adjusted closing prices)
     try:
-        load_dotenv()
-        API_KEY = os.getenv('GROWW_API_KEY')
-        API_SECRET = os.getenv('GROWW_API_SECRET')
+        from core.auth import get_groww_token
+        token = get_groww_token()
+        import contextlib
+        with contextlib.redirect_stdout(open(os.devnull, 'w')):
+            groww = GrowwAPI(token)
         
-        if API_KEY and API_SECRET:
-            token = os.environ.get('GROWW_TOKEN')
-            if not token:
-                token = GrowwAPI.get_access_token(api_key=API_KEY, secret=API_SECRET)
-                
-            import contextlib
-            with contextlib.redirect_stdout(open(os.devnull, 'w')):
-                groww = GrowwAPI(token)
-            
-            for stock in stocks:
-                try:
-                    q = groww.get_quote(stock, "NSE", "CASH")
-                    if q and 'ohlc' in q and 'close' in q['ohlc']:
-                        close_prices[stock] = {
-                            "prev_close": float(q['ohlc']['close'])
-                        }
-                except Exception as e:
-                    logger.warning(f"Could not fetch live quote for {stock}: {e}")
+        for stock in stocks:
+            try:
+                q = groww.get_quote(stock, "NSE", "CASH")
+                if q and 'ohlc' in q and 'close' in q['ohlc']:
+                    close_prices[stock] = {
+                        "prev_close": float(q['ohlc']['close'])
+                    }
+            except Exception as e:
+                logger.warning(f"Could not fetch live quote for {stock}: {e}")
     except Exception as e:
         logger.error(f"Error during API fetch for prev close: {e}")
         

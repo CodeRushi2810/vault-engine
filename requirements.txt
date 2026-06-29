@@ -4,3 +4,4 @@ python-dotenv
 
 colorlog
 google-genai
+pyotp

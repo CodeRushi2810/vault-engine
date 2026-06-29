@@ -18,17 +18,10 @@ def main():
     
     symbol = args.symbol.upper()
     
-    load_dotenv(os.path.join(BASE_DIR, '.env'))
-    API_KEY = os.getenv('GROWW_API_KEY')
-    API_SECRET = os.getenv('GROWW_API_SECRET')
-    
-    if not API_KEY or not API_SECRET:
-        logger.error("Missing GROWW_API_KEY or GROWW_API_SECRET in .env file.")
-        return
-        
     try:
         logger.info(f"Authenticating with Groww API to search for {symbol}...")
-        token = GrowwAPI.get_access_token(api_key=API_KEY, secret=API_SECRET)
+        from core.auth import get_groww_token
+        token = get_groww_token()
         groww = GrowwAPI(token)
         
         logger.info(f"Searching for {symbol} on NSE...")

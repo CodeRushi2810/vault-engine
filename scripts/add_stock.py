@@ -44,18 +44,11 @@ def run_pipeline(symbol):
     symbol = symbol.upper()
     logger.info(f"?? Starting automation pipeline for {symbol}")
     
-    load_dotenv(os.path.join(BASE_DIR, '.env'))
-    API_KEY = os.getenv('GROWW_API_KEY')
-    API_SECRET = os.getenv('GROWW_API_SECRET')
-    
-    if not API_KEY or not API_SECRET:
-        logger.error("Missing GROWW_API_KEY or GROWW_API_SECRET in .env file.")
-        return
-        
     # STEP 1: Find Token
     logger.info(f"Step 1/4: Authenticating and fetching token for {symbol}...")
     try:
-        token_auth = GrowwAPI.get_access_token(api_key=API_KEY, secret=API_SECRET)
+        from core.auth import get_groww_token
+        token_auth = get_groww_token()
         groww = GrowwAPI(token_auth)
         
         res = groww.get_instrument_by_exchange_and_trading_symbol('NSE', symbol)

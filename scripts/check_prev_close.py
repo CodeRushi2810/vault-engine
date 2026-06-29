@@ -1,7 +1,10 @@
 from growwapi import GrowwAPI
 import os
-from dotenv import load_dotenv
-load_dotenv("C:/Vault/vault-cloud-edition/vault-engine/.env")
-groww = GrowwAPI(GrowwAPI.get_access_token(api_key=os.getenv("GROWW_API_KEY"), secret=os.getenv("GROWW_API_SECRET")))
+import sys
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(BASE_DIR)
+
+from core.auth import get_groww_token
+groww = GrowwAPI(get_groww_token())
 q = groww.get_quote("JUBLFOOD", "NSE", "CASH")
 print(q.get('ohlc', {}).get('close'))

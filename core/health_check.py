@@ -51,23 +51,11 @@ def get_system_health():
     health["internet_ok"] = True
     
     # 2. Auth & Configuration Check
-    load_dotenv()
-    API_KEY = os.getenv('GROWW_API_KEY')
-    API_SECRET = os.getenv('GROWW_API_SECRET')
-    token = os.environ.get('GROWW_TOKEN')
-    
-    if not API_KEY or not API_SECRET:
-        logger.warning("Health Check Failed: Missing API credentials.")
-        _cached_health = health
-        _last_health_check_time = now
-        return health
-        
+    from core.auth import get_groww_token
     import contextlib
     try:
-        if not token:
-            with contextlib.redirect_stdout(open(os.devnull, 'w')):
-                token = GrowwAPI.get_access_token(api_key=API_KEY, secret=API_SECRET)
-                os.environ['GROWW_TOKEN'] = token
+        with contextlib.redirect_stdout(open(os.devnull, 'w')):
+            token = get_groww_token()
         
         with contextlib.redirect_stdout(open(os.devnull, 'w')):
             groww = GrowwAPI(token)

@@ -227,4 +227,4 @@ async def on_ready():
         logger.error(f"Failed to sync commands: {e}")
 
 if __name__ == '__main__':
-    client.run(TOKEN)
+    client.run(TOKEN, log_handler=None)

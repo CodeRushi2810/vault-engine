@@ -29,10 +29,7 @@ def get_market_status():
         
     return is_market_open, last_trading_date
 
-# Load credentials
-load_dotenv()
-API_KEY = os.getenv("GROWW_API_KEY")
-API_SECRET = os.getenv("GROWW_API_SECRET")
+# Target Stocks
 
 # Target Stocks
 
@@ -134,13 +131,10 @@ def update_csv_with_new_data(file_path, new_df, date_only=False):
     return len(combined_df)
 
 def main():
-    if not API_KEY or not API_SECRET:
-        logger.info("Please provide GROWW_API_KEY and GROWW_API_SECRET in the .env file.")
-        return
-
     logger.info("Authenticating with Groww...")
     try:
-        access_token = GrowwAPI.get_access_token(api_key=API_KEY, secret=API_SECRET)
+        from core.auth import get_groww_token
+        access_token = get_groww_token()
         groww = GrowwAPI(access_token)
         logger.info("Successfully authenticated with Groww!")
     except Exception as e:

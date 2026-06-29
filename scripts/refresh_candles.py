@@ -8,14 +8,11 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from core.config import STOCKS as stocks
 
-load_dotenv('C:/Vault/the-vault-trading/.env')
-API_KEY = os.getenv('GROWW_API_KEY')
-API_SECRET = os.getenv('GROWW_API_SECRET')
-token = GrowwAPI.get_access_token(api_key=API_KEY, secret=API_SECRET)
+from core.auth import get_groww_token
+token = get_groww_token()
 groww = GrowwAPI(token)
 
-
-BASE_DIR = 'C:/Vault/the-vault-trading'
+BASE_DIR = 'C:/Vault/vault-cloud-edition/vault-engine'
 
 start_time = '2026-06-15 14:00:00'
 end_time = '2026-06-16 09:45:00'  # fetching up to 9:30 candle requires end time slightly later

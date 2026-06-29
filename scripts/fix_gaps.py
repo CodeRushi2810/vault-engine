@@ -6,17 +6,14 @@ from dotenv import load_dotenv
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-load_dotenv('C:/Vault/the-vault-trading/.env')
-API_KEY = os.getenv('GROWW_API_KEY')
-API_SECRET = os.getenv('GROWW_API_SECRET')
-token = GrowwAPI.get_access_token(api_key=API_KEY, secret=API_SECRET)
-groww = GrowwAPI(token)
-
 import sys
-BASE_DIR = 'C:/Vault/the-vault-trading'
+BASE_DIR = 'C:/Vault/vault-cloud-edition/vault-engine'
 sys.path.append(BASE_DIR)
 from core.config import STOCKS
-BASE_DIR = 'C:/Vault/the-vault-trading'
+from core.auth import get_groww_token
+
+token = get_groww_token()
+groww = GrowwAPI(token)
 
 now = datetime.datetime.now()
 start_time = now.replace(hour=9, minute=0, second=0).strftime('%Y-%m-%d %H:%M:%S')
