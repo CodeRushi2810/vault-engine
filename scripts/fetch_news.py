@@ -114,8 +114,7 @@ def main():
     if stocks_with_news:
         print("Calling Gemini 1.5 API (1 single request for all stocks)...")
         try:
-            # We use gemini-pro-latest as the free tier limit is separate and much larger
-            model = genai.GenerativeModel('gemini-pro-latest')
+            model = genai.GenerativeModel('gemini-2.0-flash')
             response = model.generate_content(prompt)
             clean_json = response.text.replace('```json', '').replace('```', '').strip()
             gemini_results = json.loads(clean_json)
@@ -127,6 +126,7 @@ def main():
                     print(f"[{stock}] Analysis Complete: {news_data_output[stock]['sentiment']}")
         except Exception as e:
             print(f"Gemini API failed: {e}")
+            sys.exit(1)
 
     out_path = os.path.join(BASE_DIR, "data", "news_data.json")
     with open(out_path, 'w') as f:

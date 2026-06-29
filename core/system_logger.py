@@ -2,6 +2,24 @@ import logging
 import colorlog
 import sys
 
+class SuppressRogueErrors:
+    def __init__(self, stream):
+        self.stream = stream
+    def write(self, text):
+        # The rogue library prints "Error: \n" or "Error: <exception>\n"
+        if text.strip() == "Error:" or text.startswith("Error: \n"):
+            return
+        # If there's an empty Error: we swallow it
+        self.stream.write(text)
+    def flush(self):
+        self.stream.flush()
+    def __getattr__(self, attr):
+        return getattr(self.stream, attr)
+
+# Globally patch stdout/stderr to swallow naked "Error: " traces
+sys.stdout = SuppressRogueErrors(sys.stdout)
+sys.stderr = SuppressRogueErrors(sys.stderr)
+
 def setup_logger(name="TheVault"):
     logger = logging.getLogger(name)
     
@@ -29,5 +47,13 @@ def setup_logger(name="TheVault"):
 
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
+
+    # Suppress growwapi logs to prevent raw 'Error:' spam
+    logging.getLogger("growwapi").setLevel(logging.CRITICAL)
+    logging.getLogger("growwapi.groww").setLevel(logging.CRITICAL)
+    logging.getLogger("growwapi.groww.nats_client").setLevel(logging.CRITICAL)
+    for name in logging.root.manager.loggerDict:
+        if name.startswith("growwapi"):
+            logging.getLogger(name).setLevel(logging.CRITICAL)
 
     return logger

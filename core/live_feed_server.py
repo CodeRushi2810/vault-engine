@@ -14,10 +14,16 @@ import datetime
 
 from core.system_logger import setup_logger
 from core.config import STOCK_TOKENS as tokens, TOKEN_TO_STOCK
+from core.health_check import get_system_health
+from core.market_utils import get_market_status
 logger = setup_logger("live_feed")
 
-
-
+# Suppress growwapi logs to prevent raw 'Error:' spam
+import logging
+logging.getLogger("growwapi").setLevel(logging.CRITICAL)
+for name in logging.root.manager.loggerDict:
+    if name.startswith("growwapi"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     manager.loop = asyncio.get_running_loop()
@@ -53,6 +59,18 @@ async def get_news_data():
         with open(json_path, 'r') as f:
             return JSONResponse(content=json.load(f))
     return JSONResponse(content=[])
+
+import subprocess
+import sys
+@app.post("/api/refresh_news")
+async def refresh_news_data():
+    script_path = os.path.join(BASE_DIR, "scripts", "fetch_news.py")
+    try:
+        subprocess.run([sys.executable, script_path], check=True)
+        return JSONResponse(content={"status": "success"})
+    except subprocess.CalledProcessError as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
+
 
 @app.get("/api/notifications")
 async def get_notifications():
@@ -111,32 +129,37 @@ def on_data_received(meta):
     if manager.loop and manager.loop.is_running():
         asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(data)), manager.loop)
 
-def poll_indices(groww_client):
-    global internet_status
-    while True:
-        try:
-            nifty = groww_client.get_quote("NIFTY", "NSE", "CASH")
-            sensex = groww_client.get_quote("SENSEX", "BSE", "CASH")
-            payload = {
-                "INDICES": {
-                    "NIFTY": {
-                        "ltp": nifty.get("last_price"),
-                        "dayChange": nifty.get("day_change"),
-                        "dayChangePerc": nifty.get("day_change_perc")
-                    },
-                    "SENSEX": {
-                        "ltp": sensex.get("last_price"),
-                        "dayChange": sensex.get("day_change"),
-                        "dayChangePerc": sensex.get("day_change_perc")
+def on_index_data_received(meta):
+    global feed
+    if feed is None: return
+    raw_data = feed.get_ltp()
+    
+    payload = {"INDICES": {}}
+    
+    # Process Indices explicitly from the raw_data dictionary which returns 'p' (LTP), 'c' (Close)
+    # Different exchanges might group indices differently, usually under 'INDEX'
+    for exch in ["NSE", "BSE"]:
+        if exch in raw_data and 'INDEX' in raw_data[exch]:
+            for token, val in raw_data[exch]['INDEX'].items():
+                if token in ["NIFTY", "NIFTY 50"]:
+                    p = val.get("p", 0)
+                    c = val.get("c", p)
+                    payload["INDICES"]["NIFTY"] = {
+                        "ltp": p,
+                        "dayChange": p - c,
+                        "dayChangePerc": ((p - c) / c * 100) if c else 0
                     }
-                }
-            }
-            internet_status = "ONLINE"
-            if manager.loop and manager.loop.is_running():
-                asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(payload)), manager.loop)
-        except Exception:
-            internet_status = "OFFLINE"
-        time.sleep(5)
+                elif token in ["SENSEX"]:
+                    p = val.get("p", 0)
+                    c = val.get("c", p)
+                    payload["INDICES"]["SENSEX"] = {
+                        "ltp": p,
+                        "dayChange": p - c,
+                        "dayChangePerc": ((p - c) / c * 100) if c else 0
+                    }
+
+    if payload["INDICES"] and manager.loop and manager.loop.is_running():
+        asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(payload)), manager.loop)
 
 def poll_agents():
     while True:
@@ -217,6 +240,18 @@ def poll_agents():
                 }
             }
             payload["INTERNET_STATUS"] = internet_status
+            payload["SYSTEM_STATUS"] = get_system_health()
+            
+            market_status = get_market_status()
+            payload["MARKET_STATUS"] = market_status
+            
+            if market_status == "HOLIDAY" or market_status == "WEEKEND":
+                from core.market_utils import get_holiday_name, get_next_trading_day
+                hn = get_holiday_name()
+                nxt = get_next_trading_day()
+                if hn: payload["HOLIDAY_NAME"] = hn
+                payload["NEXT_OPEN"] = nxt.strftime("%d %B")
+            
             if manager.loop and manager.loop.is_running():
                 asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(payload)), manager.loop)
         except Exception as e:
@@ -243,33 +278,113 @@ def start_groww_feed():
         import contextlib
         with contextlib.redirect_stdout(open(os.devnull, 'w')):
             groww = GrowwAPI(access_token)
-            global feed
-            feed = GrowwFeed(groww)
         
-        threading.Thread(target=poll_indices, args=(groww,), daemon=True).start()
-        threading.Thread(target=poll_agents, daemon=True).start()
+        agents_thread = threading.Thread(target=poll_agents, daemon=True)
+        agents_thread.start()
         
-        # Tokens dynamically fetched
-        
-        
+        status = get_market_status()
+        if status not in ["PRE_MARKET", "OPEN", "POST_MARKET"]:
+            logger.info(f"Market is {status}. Bypassing Live Feed subscriptions.")
+            return
+            
         global initial_prices
         logger.info("Fetching initial quotes for all stocks...")
         for symbol, token in tokens.items():
-            try:
-                q = groww.get_quote(symbol, "NSE", "CASH")
-                if q and 'last_price' in q:
-                    initial_prices[symbol] = {"ltp": q['last_price']}
-            except Exception as e:
-                pass
+            max_retries = 3
+            retry_delay = 2
+            for attempt in range(max_retries):
+                try:
+                    q = groww.get_quote(symbol, "NSE", "CASH")
+                    if q and 'last_price' in q:
+                        initial_prices[symbol] = {"ltp": q['last_price']}
+                    
+                    time.sleep(0.5)
+                    break
+                except Exception as e:
+                    error_str = str(e).lower()
+                    if "rate limit" in error_str or "429" in error_str:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"Rate limit hit for {symbol}. Retrying in {retry_delay}s...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                            continue
+                    break
                 
         instruments_list = [{"exchange": "NSE", "segment": "CASH", "exchange_token": str(v)} for v in tokens.values()]
+        index_instruments = [
+            {"exchange": "NSE", "segment": "INDEX", "exchange_token": "NIFTY"},
+            {"exchange": "NSE", "segment": "INDEX", "exchange_token": "NIFTY 50"},
+            {"exchange": "BSE", "segment": "INDEX", "exchange_token": "SENSEX"}
+        ]
         
-        logger.info("Subscribing to LTP for stocks...")
-        feed.subscribe_ltp(instruments_list, on_data_received=on_data_received)
-        logger.info("Consuming feed...")
-        feed.consume()
+        while True:
+            try:
+                import concurrent.futures
+                def _init_feed():
+                    with contextlib.redirect_stdout(open(os.devnull, 'w')):
+                        return GrowwFeed(groww)
+                        
+                logger.info("Connecting to Groww WebSockets (NATS)...")
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                future = executor.submit(_init_feed)
+                global feed
+                feed = future.result(timeout=10)
+                    
+                logger.info("Subscribing to LTP for stocks...")
+                feed.subscribe_ltp(instruments_list, on_data_received=on_data_received)
+                
+                logger.info("Subscribing to Live Index values for NIFTY and SENSEX...")
+                feed.subscribe_index_value(index_instruments, on_data_received=on_index_data_received)
+                
+                logger.info("Consuming feed...")
+                feed.consume()
+                # If successful, NATS is running in background and handles its own reconnects. Break outer loop.
+                break
+            except Exception as e:
+                logger.error(f"Error starting feed (NATS): {e}")
+                logger.info("Falling back to REST Polling for 5 minutes before retrying NATS...")
+                
+                fallback_start = time.time()
+                while time.time() - fallback_start < 300:
+                    time.sleep(2)  # Wait a bit between global polls to avoid hitting the 10 req/s hard limit
+                    
+                    # Fallback for Indices
+                    try:
+                        for idx_symbol, idx_exch in [("NIFTY", "NSE"), ("SENSEX", "BSE")]:
+                            q = groww.get_quote(idx_symbol, idx_exch, "CASH")
+                            if q and 'last_price' in q:
+                                c = q.get('ohlc', {}).get('close', q['last_price'])
+                                payload = {"INDICES": {idx_symbol: {
+                                    "ltp": q['last_price'],
+                                    "dayChange": q['last_price'] - c,
+                                    "dayChangePerc": ((q['last_price'] - c) / c * 100) if c else 0
+                                }}}
+                                if manager.loop and manager.loop.is_running():
+                                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(payload)), manager.loop)
+                            time.sleep(0.15)
+                    except Exception:
+                        pass
+                    
+                    # Fallback for Stocks
+                    for symbol, token in tokens.items():
+                        try:
+                            q = groww.get_quote(symbol, "NSE", "CASH")
+                            if q and 'last_price' in q:
+                                initial_prices[symbol] = {"ltp": q['last_price']}
+                                # Broadcast to UI
+                                if manager.loop and manager.loop.is_running():
+                                    asyncio.run_coroutine_threadsafe(
+                                        manager.broadcast(json.dumps({"NSE": {"CASH": {symbol: {"ltp": q['last_price']}}}})),
+                                        manager.loop
+                                    )
+                            time.sleep(0.15)
+                        except Exception as poll_e:
+                            error_str = str(poll_e).lower()
+                            if "rate limit" in error_str or "429" in error_str:
+                                time.sleep(5)
+                            continue
     except Exception as e:
-        logger.error(f"Error starting feed: {e}")
+        logger.error(f"Error in start_groww_feed: {e}")
 
 
 @app.websocket("/ws")

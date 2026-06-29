@@ -10,7 +10,10 @@ logger = setup_logger("data_utils")
 
 def get_previous_close_prices():
     close_prices = {}
+    now = datetime.datetime.now().date()
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
+    # PRIMARY SOURCE: Groww API (100% accurate adjusted closing prices)
     try:
         load_dotenv()
         API_KEY = os.getenv('GROWW_API_KEY')
@@ -33,48 +36,32 @@ def get_previous_close_prices():
                             "prev_close": float(q['ohlc']['close'])
                         }
                 except Exception as e:
-                    logger.warning(f"Could not fetch live quote for {stock}, falling back to CSV.")
-                    pass
+                    logger.warning(f"Could not fetch live quote for {stock}: {e}")
     except Exception as e:
-        logger.error(f"Error fetching API quotes: {e}")
+        logger.error(f"Error during API fetch for prev close: {e}")
         
-    # Fallback to CSV for any missing stocks
-    now = datetime.datetime.now().date()
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    
-    try:
-        for stock in stocks:
-            if stock in close_prices:
-                continue
-                
-            csv_path = os.path.join(BASE_DIR, "data", stock, "1d_candles.csv")
+    # FALLBACK SOURCE: Local CSV Data (for any stocks that failed)
+    missing_stocks = [s for s in stocks if s not in close_prices]
+    for stock in missing_stocks:
+        csv_path = os.path.join(BASE_DIR, "data", stock, "1d_candles.csv")
+        try:
             if os.path.exists(csv_path):
                 df = pd.read_csv(csv_path)
-                df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-                df['Date'] = df['Timestamp'].dt.date
-                daily_closes = df
-                
-                if len(daily_closes) >= 2:
-                    date_n = daily_closes.iloc[-1]['Date']
-                    if date_n == now:
-                        close_prices[stock] = {
-                            "prev_close": float(daily_closes.iloc[-2]['Close'])
-                        }
-                    else:
-                        close_prices[stock] = {
-                            "prev_close": float(daily_closes.iloc[-1]['Close'])
-                        }
-                elif not daily_closes.empty:
-                    date_n = daily_closes.iloc[-1]['Date']
-                    if date_n == now:
-                        close_prices[stock] = {
-                            "prev_close": float(daily_closes.iloc[-1]['Close'])
-                        }
-                    else:
-                        close_prices[stock] = {
-                            "prev_close": float(daily_closes.iloc[-1]['Close'])
-                        }
-    except Exception as e:
-        logger.error(f"Error calculating prev closes: {e}")
-        
+                if not df.empty:
+                    df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+                    df['Date'] = df['Timestamp'].dt.date
+                    
+                    if len(df) >= 2:
+                        last_date = df.iloc[-1]['Date']
+                        if last_date == now:
+                            close_prices[stock] = {"prev_close": float(df.iloc[-2]['Close'])}
+                        else:
+                            close_prices[stock] = {"prev_close": float(df.iloc[-1]['Close'])}
+                    elif len(df) == 1:
+                        last_date = df.iloc[-1]['Date']
+                        if last_date != now:
+                            close_prices[stock] = {"prev_close": float(df.iloc[-1]['Close'])}
+        except Exception as e:
+            logger.warning(f"Error reading CSV fallback for {stock}: {e}")
+            
     return close_prices

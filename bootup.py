@@ -7,28 +7,17 @@ import pandas as pd
 import websockets
 import asyncio
 import threading
+import contextlib
 
-def is_market_open():
-    now = datetime.datetime.now()
-    # Check if weekday (0=Monday, 4=Friday)
-    if now.weekday() > 4:
-        return False
-        
-    # Check if between 9:00 AM and 3:30 PM
-    start = now.replace(hour=8, minute=50, second=0, microsecond=0)
-    end = now.replace(hour=16, minute=0, second=0, microsecond=0)
-    
-    return start <= now <= end
-
+from core.market_utils import is_market_open, get_market_status
 from core.data_utils import get_previous_close_prices
-
+from core.health_check import is_connected_to_internet
 from core.system_logger import setup_logger
+
 logger = setup_logger("bootup")
 
-
-
 def generate_previous_close():
-    logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Injecting previous close prices into dashboard_data.json...")
+    logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Injecting previous close and offline prices into dashboard_data.json...")
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     
     try:
@@ -44,6 +33,47 @@ def generate_previous_close():
                 pass
                 
         data["prevClosePrices"] = close_prices
+        
+        # Inject offline LTP if market is closed to prevent 0% drops in UI
+        if not is_market_open():
+            if "market_data" not in data:
+                data["market_data"] = {}
+            try:
+                from growwapi import GrowwAPI
+                if os.environ.get('GROWW_TOKEN'):
+                    with contextlib.redirect_stdout(open(os.devnull, 'w')):
+                        groww = GrowwAPI(os.environ.get('GROWW_TOKEN'))
+                        
+                        # Fetch official VWAP closing prices for all tracked stocks
+                        for stock in close_prices.keys():
+                            try:
+                                q = groww.get_quote(stock, "NSE", "CASH")
+                                if q and 'last_price' in q:
+                                    data["market_data"][stock] = q['last_price']
+                                else:
+                                    # Fallback to local CSV if API fails
+                                    data["market_data"][stock] = close_prices[stock]
+                            except Exception:
+                                data["market_data"][stock] = close_prices[stock]
+
+                        # Fetch indices directly via API
+                        nifty = groww.get_quote("NIFTY", "NSE", "CASH")
+                        sensex = groww.get_quote("SENSEX", "BSE", "CASH")
+                        
+                        data["INDICES"] = {
+                            "NIFTY": {
+                                "ltp": nifty.get("last_price") if nifty else None,
+                                "dayChange": nifty.get("day_change") if nifty else None,
+                                "dayChangePerc": nifty.get("day_change_perc") if nifty else None
+                            },
+                            "SENSEX": {
+                                "ltp": sensex.get("last_price") if sensex else None,
+                                "dayChange": sensex.get("day_change") if sensex else None,
+                                "dayChangePerc": sensex.get("day_change_perc") if sensex else None
+                            }
+                        }
+            except Exception as e:
+                logger.error(f"Failed to fetch VWAP quotes: {e}")
         
         with open(json_path, 'w') as f:
             json.dump(data, f)
@@ -77,6 +107,11 @@ def main():
     import contextlib
 
     load_dotenv()
+    logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Awaiting internet connection...")
+    while not is_connected_to_internet():
+        time.sleep(5)
+    logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Internet connection verified.")
+    
     API_KEY = os.getenv('GROWW_API_KEY')
     API_SECRET = os.getenv('GROWW_API_SECRET')
     if API_KEY and API_SECRET:
@@ -106,17 +141,22 @@ def main():
     logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting background Discord listener (core/discord_listener.py)...")
     discord_process = subprocess.Popen(["python", "-m", "core.discord_listener"])
     
-    market_state = "OPEN" if is_market_open() else "CLOSED"
+    market_state = get_market_status()
     
     try:
         while True:
-            current_state = "OPEN" if is_market_open() else "CLOSED"
+            current_state = get_market_status()
             
-            # Detect transition from OPEN to CLOSED
-            if current_state == "CLOSED" and market_state == "OPEN":
-                logger.info(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Market transitioned to CLOSED.")
+            # Detect transition from OPEN to POST_MARKET
+            if current_state == "POST_MARKET" and market_state == "OPEN":
+                logger.info(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Market transitioned to POST_MARKET.")
                 logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Fetching end-of-day 1D candles from Groww API...")
                 subprocess.run(["python", "-m", "core.fetch_data"])
+                
+            # Detect transition from POST_MARKET to CLOSED
+            elif current_state == "CLOSED" and market_state == "POST_MARKET":
+                logger.info(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Market transitioned to CLOSED.")
+                logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Fetching final official VWAP closing prices...")
                 generate_previous_close()
                 
                 # Restart feed server to refresh tokens and clear cache for the night
@@ -125,11 +165,11 @@ def main():
                 feed_process.wait()
                 feed_process = subprocess.Popen(["python", "-m", "core.live_feed_server"])
                 
-            # Detect transition from CLOSED to OPEN
-            elif current_state == "OPEN" and market_state == "CLOSED":
-                logger.info(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Market transitioned to OPEN.")
-                # Restart feed server to get fresh morning token
-                logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Restarting live_feed_server.py for morning session...")
+            # Detect transition from CLOSED to PRE_MARKET
+            elif current_state == "PRE_MARKET" and market_state in ["CLOSED", "HOLIDAY", "WEEKEND"]:
+                logger.info(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Market transitioned to PRE_MARKET.")
+                # Restart feed server to get fresh morning token and warmup connections
+                logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Restarting live_feed_server.py for morning warmup...")
                 feed_process.terminate()
                 feed_process.wait()
                 feed_process = subprocess.Popen(["python", "-m", "core.live_feed_server"])
@@ -139,6 +179,10 @@ def main():
                     discord_process.terminate()
                     discord_process.wait()
                 discord_process = subprocess.Popen(["python", "-m", "core.discord_listener"])
+                
+            # Log transition to OPEN
+            elif current_state == "OPEN" and market_state == "PRE_MARKET":
+                logger.info(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Market transitioned to OPEN. Continuous trading active.")
 
             market_state = current_state
             time.sleep(5)

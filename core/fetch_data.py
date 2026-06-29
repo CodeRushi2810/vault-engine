@@ -1,5 +1,5 @@
 import os
-import time
+import time as sys_time
 import pandas as pd
 from growwapi import GrowwAPI
 from dotenv import load_dotenv
@@ -39,11 +39,13 @@ API_SECRET = os.getenv("GROWW_API_SECRET")
 
 
 def get_groww_history(groww, stock_name, interval_constant, start_time, end_time):
-    # Determine chunk days based on interval
-    if interval_constant == groww.CANDLE_INTERVAL_DAY:
+    # Determine chunk days based on Groww API backtesting limits
+    if interval_constant in [groww.CANDLE_INTERVAL_DAY, groww.CANDLE_INTERVAL_WEEK, groww.CANDLE_INTERVAL_MONTH]:
         chunk_days = 180
+    elif interval_constant in [groww.CANDLE_INTERVAL_MIN_10, groww.CANDLE_INTERVAL_MIN_15, groww.CANDLE_INTERVAL_MIN_30]:
+        chunk_days = 90
     else:
-        chunk_days = 15
+        chunk_days = 30
         
     all_candles = []
     
@@ -56,25 +58,38 @@ def get_groww_history(groww, stock_name, interval_constant, start_time, end_time
         start_str = current_start.strftime('%Y-%m-%d %H:%M:%S')
         end_str = current_end.strftime('%Y-%m-%d %H:%M:%S')
         
-        try:
-            # BUG FIX: Groww's 15m API skips 10:30, 12:30, etc. We must fetch 5m candles and aggregate them.
-            actual_interval = groww.CANDLE_INTERVAL_MIN_5 if interval_constant == groww.CANDLE_INTERVAL_MIN_15 else interval_constant
-            
-            response = groww.get_historical_candles(
-                exchange=groww.EXCHANGE_NSE,
-                segment=groww.SEGMENT_CASH,
-                groww_symbol=f"NSE-{stock_name}",
-                start_time=start_str,
-                end_time=end_str,
-                candle_interval=actual_interval
-            )
-            
-            candles = response.get("candles", [])
-            if candles:
-                all_candles.extend(candles)
+        max_retries = 3
+        retry_delay = 2
+        for attempt in range(max_retries):
+            try:
+                response = groww.get_historical_candles(
+                    exchange=groww.EXCHANGE_NSE,
+                    segment=groww.SEGMENT_CASH,
+                    groww_symbol=f"NSE-{stock_name}",
+                    start_time=start_str,
+                    end_time=end_str,
+                    candle_interval=interval_constant
+                )
                 
-        except Exception as e:
-            logger.error(f"Error fetching Groww data for {stock_name} from {start_str} to {end_str}: {e}")
+                candles = response.get("candles", [])
+                if candles:
+                    all_candles.extend(candles)
+                
+                # Small delay to prevent rate limit on next request
+                sys_time.sleep(0.5)
+                break
+                    
+            except Exception as e:
+                error_str = str(e).lower()
+                if "rate limit" in error_str or "429" in error_str:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Rate limit hit for {stock_name}. Retrying in {retry_delay}s...")
+                        sys_time.sleep(retry_delay)
+                        retry_delay *= 2
+                        continue
+                
+                logger.error(f"Error fetching Groww data for {stock_name} from {start_str} to {end_str}: {e}")
+                break
             
         current_start = current_end
         
@@ -90,18 +105,7 @@ def get_groww_history(groww, stock_name, interval_constant, start_time, end_time
     df.drop_duplicates(subset=['Timestamp'], inplace=True)
     df.sort_values('Timestamp', inplace=True)
     
-    if interval_constant == groww.CANDLE_INTERVAL_MIN_15 and not df.empty:
-        # Resample 5m to 15m
-        df.set_index('Timestamp', inplace=True)
-        resampled = df.resample('15min').agg({
-            'Open': 'first',
-            'High': 'max',
-            'Low': 'min',
-            'Close': 'last',
-            'Volume': 'sum'
-        }).dropna()
-        resampled.reset_index(inplace=True)
-        df = resampled
+    # No need to resample since we are directly fetching the required interval natively
     
     return df
 

@@ -125,8 +125,9 @@ def get_today_summary():
         pnl_icon = "🟢" if realized_pnl >= 0 else "🔴"
         pnl_str = f"+Rs {realized_pnl:,.2f}" if realized_pnl >= 0 else f"-Rs {abs(realized_pnl):,.2f}"
         
-        closed_str = ""
         if not closed_today.empty:
+            chunks = []
+            current_chunk = ""
             for _, row in closed_today.iterrows():
                 name = get_stock_name(row['Stock'])
                 c_pnl = row['PnL_Amount']
@@ -134,11 +135,29 @@ def get_today_summary():
                 c_icon = "🟩" if c_pnl >= 0 else "🟥"
                 c_pnl_str = f"+Rs {c_pnl:,.2f}" if c_pnl >= 0 else f"-Rs {abs(c_pnl):,.2f}"
                 c_pct_str = f"+{c_pct:.2f}%" if c_pct >= 0 else f"{c_pct:.2f}%"
-                closed_str += f"**{name}**: {row['Shares']} shares | Entry: Rs {row['Entry_Price']:,.2f} | Exit: Rs {row['Exit_Price']:,.2f}\n└ Profit: {c_icon} {c_pnl_str} ({c_pct_str})\n\n"
-        if not closed_str:
-            closed_str = "No trades closed today."
-            
-        embed.add_field(name=f"Trades Closed Today ({wins} W / {losses} L)", value=f"**Realized PnL:** {pnl_icon} {pnl_str}\n\n{closed_str}", inline=False)
+                entry_str = f"**{name}**: {row['Shares']} shares | Entry: Rs {row['Entry_Price']:,.2f} | Exit: Rs {row['Exit_Price']:,.2f}\n└ Profit: {c_icon} {c_pnl_str} ({c_pct_str})\n\n"
+                
+                if len(current_chunk) + len(entry_str) > 1024:
+                    chunks.append(current_chunk)
+                    current_chunk = entry_str
+                else:
+                    current_chunk += entry_str
+            if current_chunk:
+                chunks.append(current_chunk)
+                
+            for i, chunk in enumerate(chunks):
+                if i == 0:
+                    title = f"Trades Closed Today ({wins} W / {losses} L)"
+                    val = f"**Realized PnL:** {pnl_icon} {pnl_str}\n\n{chunk}"
+                    if len(val) > 1024:
+                        embed.add_field(name=title, value=f"**Realized PnL:** {pnl_icon} {pnl_str}\n\n", inline=False)
+                        embed.add_field(name="Trades Closed (Cont.)", value=chunk, inline=False)
+                    else:
+                        embed.add_field(name=title, value=val, inline=False)
+                else:
+                    embed.add_field(name="Trades Closed (Cont.)", value=chunk, inline=False)
+        else:
+            embed.add_field(name=f"Trades Closed Today (0 W / 0 L)", value=f"**Realized PnL:** {pnl_icon} {pnl_str}\n\nNo trades closed today.", inline=False)
         
         # Calculate Uninvested Wallet Balance
         all_time_realized = df[df['Status'] == 'CLOSED']['PnL_Amount'].sum() if not df[df['Status'] == 'CLOSED'].empty else 0
@@ -153,18 +172,29 @@ def get_today_summary():
         embed.add_field(name="💼 PORTFOLIO STATUS", value=port_str, inline=False)
         
         # Open Positions Details
-        open_str = ""
         if open_count > 0:
+            chunks = []
+            current_chunk = ""
             for _, row in open_positions.iterrows():
                 name = get_stock_name(row['Stock'])
                 u_pnl = row['PnL_Amount']
                 u_pnl_str = f"+Rs {u_pnl:,.2f}" if u_pnl >= 0 else f"-Rs {abs(u_pnl):,.2f}"
                 u_icon = "🟩" if u_pnl >= 0 else "🟥"
-                open_str += f"**{name}**: {row['Shares']} shares @ Rs {row['Entry_Price']:,.2f}\n└ PnL: {u_icon} {u_pnl_str} ({row['PnL_Percent']:.2f}%)\n\n"
+                entry_str = f"**{name}**: {row['Shares']} shares @ Rs {row['Entry_Price']:,.2f}\n└ PnL: {u_icon} {u_pnl_str} ({row['PnL_Percent']:.2f}%)\n\n"
+                
+                if len(current_chunk) + len(entry_str) > 1024:
+                    chunks.append(current_chunk)
+                    current_chunk = entry_str
+                else:
+                    current_chunk += entry_str
+            if current_chunk:
+                chunks.append(current_chunk)
+                
+            for i, chunk in enumerate(chunks):
+                title = f"📂 OPEN POSITIONS ({open_count})" if i == 0 else "📂 OPEN POSITIONS (Cont.)"
+                embed.add_field(name=title, value=chunk, inline=False)
         else:
-            open_str = "None"
-            
-        embed.add_field(name=f"📂 OPEN POSITIONS ({open_count})", value=open_str, inline=False)
+            embed.add_field(name=f"📂 OPEN POSITIONS (0)", value="None", inline=False)
             
         return embed
         
@@ -185,7 +215,7 @@ async def summary_command(interaction: discord.Interaction):
 
 @tree.command(name="ping", description="Check if the trading engine is online.")
 async def ping_command(interaction: discord.Interaction):
-    await interaction.response.send_message("Pong! AETHER execution engine is online and monitoring. 🟢")
+    await interaction.response.send_message("Pong! AETHER execution engine is online and monitoring.")
 
 @client.event
 async def on_ready():
