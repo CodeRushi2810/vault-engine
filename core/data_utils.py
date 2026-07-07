@@ -1,6 +1,7 @@
 import os
 import datetime
 import pandas as pd
+import json
 from dotenv import load_dotenv
 
 from core.system_logger import setup_logger
@@ -33,28 +34,33 @@ def get_previous_close_prices():
     except Exception as e:
         logger.error(f"Error during API fetch for prev close: {e}")
         
-    # FALLBACK SOURCE: Local CSV Data (for any stocks that failed)
-    missing_stocks = [s for s in stocks if s not in close_prices]
-    for stock in missing_stocks:
-        csv_path = os.path.join(BASE_DIR, "data", stock, "1d_candles.csv")
+    # CACHE SUCCESSFUL API HITS
+    cache_path = os.path.join(BASE_DIR, "data", "prev_close.json")
+    if len(close_prices) == len(stocks):
         try:
-            if os.path.exists(csv_path):
-                df = pd.read_csv(csv_path)
-                if not df.empty:
-                    df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-                    df['Date'] = df['Timestamp'].dt.date
-                    
-                    if len(df) >= 2:
-                        last_date = df.iloc[-1]['Date']
-                        if last_date == now:
-                            close_prices[stock] = {"prev_close": float(df.iloc[-2]['Close'])}
-                        else:
-                            close_prices[stock] = {"prev_close": float(df.iloc[-1]['Close'])}
-                    elif len(df) == 1:
-                        last_date = df.iloc[-1]['Date']
-                        if last_date != now:
-                            close_prices[stock] = {"prev_close": float(df.iloc[-1]['Close'])}
+            with open(cache_path, "w") as f:
+                json.dump(close_prices, f, indent=4)
+            logger.info("Successfully updated prev_close.json cache from Groww API.")
         except Exception as e:
-            logger.warning(f"Error reading CSV fallback for {stock}: {e}")
+            logger.error(f"Failed to write prev_close.json cache: {e}")
+            
+    # FALLBACK SOURCE: Local JSON Cache (for any stocks that failed)
+    missing_stocks = [s for s in stocks if s not in close_prices]
+    if missing_stocks:
+        logger.warning(f"API missed {len(missing_stocks)} stocks. Falling back to prev_close.json cache...")
+        try:
+            if os.path.exists(cache_path):
+                with open(cache_path, "r") as f:
+                    cached_data = json.load(f)
+                for stock in missing_stocks:
+                    if stock in cached_data:
+                        close_prices[stock] = cached_data[stock]
+                        logger.info(f"Loaded {stock} from prev_close.json cache.")
+                    else:
+                        logger.error(f"Stock {stock} not found in prev_close.json cache!")
+            else:
+                logger.error("Fallback failed: prev_close.json does not exist yet.")
+        except Exception as e:
+            logger.warning(f"Error reading JSON fallback: {e}")
             
     return close_prices

@@ -173,7 +173,7 @@ def main():
                     if last_ts.date() >= last_trading_date and last_ts.hour >= 15:
                         is_15m_up_to_date = True
                         
-                start_time_15m = last_ts - timedelta(days=5)
+                start_time_15m = last_ts
                 if start_time_15m < end_time - timedelta(days=90):
                     start_time_15m = end_time - timedelta(days=90)
                 logger.info(f"Found existing 15m data for {stock}. Last timestamp: {last_ts}.")
@@ -193,45 +193,7 @@ def main():
             else:
                 logger.info(f"No new 15m data fetched for {stock}.")
                 
-        # ----------------------------------------------------
-        # 2. 1d Candles Update
-        # ----------------------------------------------------
-        file_1d = os.path.join(stock_dir, "1d_candles.csv")
-        start_time_1d = end_time - timedelta(days=365) # Default max available length for 1d
-        is_1d_up_to_date = False
-        
-        if os.path.exists(file_1d):
-            df_existing_1d = pd.read_csv(file_1d)
-            if not df_existing_1d.empty:
-                last_ts_1d = pd.to_datetime(df_existing_1d['Timestamp'].max())
-                
-                # Check if it has today's candle if we are post-market, else it just needs yesterday's
-                if not is_market_open and last_ts_1d.date() >= last_trading_date:
-                    is_1d_up_to_date = True
-                elif is_market_open and last_ts_1d.date() >= last_trading_date:
-                    # In market open, today's candle is technically incomplete, but if it has yesterday's, it's mostly up to date.
-                    # We always fetch if market is open to update the current 'today' candle.
-                    pass
-                        
-                start_time_1d = last_ts_1d - timedelta(days=5)
-                if start_time_1d < end_time - timedelta(days=365):
-                    start_time_1d = end_time - timedelta(days=365)
-                logger.info(f"Found existing 1d data for {stock}. Last timestamp: {last_ts_1d}.")
-            else:
-                logger.info(f"1d file exists but empty for {stock}.")
-        else:
-            logger.info(f"No existing 1d data for {stock}.")
-            
-        if is_1d_up_to_date:
-            logger.info(f"1d data is already up to date for {stock}. Skipping fetch.")
-        elif start_time_1d < end_time:
-            logger.info(f"Fetching 1d candles from Groww for {stock} since {start_time_1d}...")
-            df_1d = get_groww_history(groww, stock, groww.CANDLE_INTERVAL_DAY, start_time_1d, end_time)
-            if not df_1d.empty:
-                total_1d = update_csv_with_new_data(file_1d, df_1d, date_only=True)
-                logger.info(f"Updated 1d candles for {stock} (Total rows: {total_1d}).")
-            else:
-                logger.info(f"No new 1d data fetched for {stock}.")
+
         
 
 

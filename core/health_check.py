@@ -8,10 +8,12 @@ logger = logging.getLogger("health_check")
 
 def is_connected_to_internet(timeout=3):
     try:
+        start = time.time()
         socket.create_connection(("8.8.8.8", 53), timeout=timeout)
-        return True
+        latency = int((time.time() - start) * 1000)
+        return True, latency
     except OSError:
-        return False
+        return False, 0
 
 import time
 
@@ -21,13 +23,7 @@ _HEALTH_CHECK_INTERVAL = 15
 
 def get_system_health():
     """
-    Returns a dictionary detailing the sequential health checks:
-    {
-        "internet_ok": bool,
-        "auth_ok": bool,
-        "api_ok": bool,
-        "overall_ok": bool
-    }
+    Returns a dictionary detailing the sequential health checks.
     """
     global _cached_health, _last_health_check_time
     now = time.time()
@@ -36,21 +32,35 @@ def get_system_health():
 
     health = {
         "internet_ok": False,
+        "ping_latency_ms": 0,
         "auth_ok": False,
         "api_ok": False,
+        "db_ok": False,
         "overall_ok": False
     }
     
     # 1. Internet Check
-    if not is_connected_to_internet():
+    is_connected, latency = is_connected_to_internet()
+    if not is_connected:
         logger.warning("Health Check Failed: No Internet Connection.")
         _cached_health = health
         _last_health_check_time = now
         return health
         
     health["internet_ok"] = True
+    health["ping_latency_ms"] = latency
     
-    # 2. Auth & Configuration Check
+    # 2. Database Write Check
+    data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+    if os.access(data_dir, os.W_OK):
+        health["db_ok"] = True
+    else:
+        logger.warning("Health Check Failed: Data directory is not writable.")
+        _cached_health = health
+        _last_health_check_time = now
+        return health
+
+    # 3. Auth & Configuration Check
     from core.auth import get_groww_token
     import contextlib
     try:
@@ -67,7 +77,7 @@ def get_system_health():
         _last_health_check_time = now
         return health
         
-    # 3. API Functional Check
+    # 4. API Functional Check
     try:
         with contextlib.redirect_stdout(open(os.devnull, 'w')):
             q = groww.get_quote("NIFTY", "NSE", "CASH")

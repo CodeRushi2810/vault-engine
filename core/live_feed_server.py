@@ -52,25 +52,6 @@ async def get_dashboard_data():
             return JSONResponse(content=json.load(f))
     return JSONResponse(content={"trades": []})
 
-@app.get("/api/news_data")
-async def get_news_data():
-    json_path = os.path.join(BASE_DIR, "data", "news_data.json")
-    if os.path.exists(json_path):
-        with open(json_path, 'r') as f:
-            return JSONResponse(content=json.load(f))
-    return JSONResponse(content=[])
-
-import subprocess
-import sys
-@app.post("/api/refresh_news")
-async def refresh_news_data():
-    script_path = os.path.join(BASE_DIR, "scripts", "fetch_news.py")
-    try:
-        subprocess.run([sys.executable, script_path], check=True)
-        return JSONResponse(content={"status": "success"})
-    except subprocess.CalledProcessError as e:
-        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
-
 
 @app.get("/api/notifications")
 async def get_notifications():
@@ -129,37 +110,7 @@ def on_data_received(meta):
     if manager.loop and manager.loop.is_running():
         asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(data)), manager.loop)
 
-def on_index_data_received(meta):
-    global feed
-    if feed is None: return
-    raw_data = feed.get_ltp()
-    
-    payload = {"INDICES": {}}
-    
-    # Process Indices explicitly from the raw_data dictionary which returns 'p' (LTP), 'c' (Close)
-    # Different exchanges might group indices differently, usually under 'INDEX'
-    for exch in ["NSE", "BSE"]:
-        if exch in raw_data and 'INDEX' in raw_data[exch]:
-            for token, val in raw_data[exch]['INDEX'].items():
-                if token in ["NIFTY", "NIFTY 50"]:
-                    p = val.get("p", 0)
-                    c = val.get("c", p)
-                    payload["INDICES"]["NIFTY"] = {
-                        "ltp": p,
-                        "dayChange": p - c,
-                        "dayChangePerc": ((p - c) / c * 100) if c else 0
-                    }
-                elif token in ["SENSEX"]:
-                    p = val.get("p", 0)
-                    c = val.get("c", p)
-                    payload["INDICES"]["SENSEX"] = {
-                        "ltp": p,
-                        "dayChange": p - c,
-                        "dayChangePerc": ((p - c) / c * 100) if c else 0
-                    }
 
-    if payload["INDICES"] and manager.loop and manager.loop.is_running():
-        asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(payload)), manager.loop)
 
 def poll_agents():
     while True:
@@ -242,6 +193,24 @@ def poll_agents():
             payload["INTERNET_STATUS"] = internet_status
             payload["SYSTEM_STATUS"] = get_system_health()
             
+            # Determine FEED_STATE
+            if feed is not None:
+                payload["FEED_STATE"] = "NATS_WEBSOCKET"
+            elif get_market_status() == "PRE_MARKET":
+                payload["FEED_STATE"] = "PRE_MARKET_POLLING"
+            else:
+                payload["FEED_STATE"] = "REST_POLLING"
+                
+            # Read PROCESS_METRICS
+            try:
+                import json, os
+                metrics_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "process_metrics.json")
+                if os.path.exists(metrics_file):
+                    with open(metrics_file, 'r') as f:
+                        payload["PROCESS_METRICS"] = json.load(f)
+            except Exception:
+                pass
+
             market_status = get_market_status()
             payload["MARKET_STATUS"] = market_status
             
@@ -258,6 +227,76 @@ def poll_agents():
             logger.error("Error polling agents:", e)
         time.sleep(1)
 
+def poll_indices(groww):
+    """
+    Dedicated background thread to poll NIFTY and SENSEX via REST.
+    Bypasses WebSocket index issues where 'p' defaults to 0.
+    """
+    while True:
+        try:
+            from core.market_utils import get_market_status
+            status = get_market_status()
+            if status in ["OPEN", "PRE_MARKET"]:
+                payload = {"INDICES": {}}
+                for idx_symbol, idx_exch in [("NIFTY", "NSE"), ("SENSEX", "BSE")]:
+                    try:
+                        q = groww.get_quote(idx_symbol, idx_exch, "CASH")
+                        if q and 'last_price' in q:
+                            c = q.get('ohlc', {}).get('close', q['last_price'])
+                            payload["INDICES"][idx_symbol] = {
+                                "ltp": q['last_price'],
+                                "dayChange": q['last_price'] - c,
+                                "dayChangePerc": ((q['last_price'] - c) / c * 100) if c else 0
+                            }
+                    except:
+                        pass
+                if payload["INDICES"] and manager.loop and manager.loop.is_running():
+                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(payload)), manager.loop)
+            time.sleep(3)
+        except Exception as e:
+            time.sleep(3)
+
+def pre_market_poller(groww, tokens):
+    """
+    Dedicated background thread to poll the REST API every 15 seconds 
+    during the PRE_MARKET phase (9:00 - 9:15) to capture the 9:08 Indicative Equilibrium Price,
+    because the WebSocket feed is notoriously silent until 9:15.
+    """
+    while True:
+        try:
+            from core.market_utils import get_market_status
+            if get_market_status() == "PRE_MARKET":
+                data = {'NSE': {'CASH': {}}}
+                for symbol, token in tokens.items():
+                    try:
+                        q = groww.get_quote(symbol, "NSE", "CASH")
+                        if q and 'last_price' in q:
+                            data['NSE']['CASH'][symbol] = {"p": q['last_price']}
+                    except:
+                        pass
+                
+                # Also poll indices
+                data['INDICES'] = {}
+                for idx_symbol, idx_exch in [("NIFTY", "NSE"), ("SENSEX", "BSE")]:
+                    try:
+                        q = groww.get_quote(idx_symbol, idx_exch, "CASH")
+                        if q and 'last_price' in q:
+                            c = q.get('ohlc', {}).get('close', q['last_price'])
+                            data["INDICES"][idx_symbol] = {
+                                "ltp": q['last_price'],
+                                "dayChange": q['last_price'] - c,
+                                "dayChangePerc": ((q['last_price'] - c) / c * 100) if c else 0
+                            }
+                    except:
+                        pass
+                
+                if manager.loop and manager.loop.is_running():
+                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(data)), manager.loop)
+                    
+            time.sleep(15)
+        except Exception as e:
+            time.sleep(5)
+
 def start_groww_feed():
     try:
         logger.info("Initializing Live Feed Server with shared Token...")
@@ -271,6 +310,12 @@ def start_groww_feed():
         
         agents_thread = threading.Thread(target=poll_agents, daemon=True)
         agents_thread.start()
+        
+        pre_market_thread = threading.Thread(target=pre_market_poller, args=(groww, tokens), daemon=True)
+        pre_market_thread.start()
+
+        index_poller_thread = threading.Thread(target=poll_indices, args=(groww,), daemon=True)
+        index_poller_thread.start()
         
         status = get_market_status()
         if status not in ["PRE_MARKET", "OPEN", "POST_MARKET"]:
@@ -301,11 +346,7 @@ def start_groww_feed():
                     break
                 
         instruments_list = [{"exchange": "NSE", "segment": "CASH", "exchange_token": str(v)} for v in tokens.values()]
-        index_instruments = [
-            {"exchange": "NSE", "segment": "INDEX", "exchange_token": "NIFTY"},
-            {"exchange": "NSE", "segment": "INDEX", "exchange_token": "NIFTY 50"},
-            {"exchange": "BSE", "segment": "INDEX", "exchange_token": "SENSEX"}
-        ]
+
         
         while True:
             try:
@@ -318,13 +359,14 @@ def start_groww_feed():
                 executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                 future = executor.submit(_init_feed)
                 global feed
-                feed = future.result(timeout=10)
+                
+                try:
+                    feed = future.result(timeout=30)
+                except concurrent.futures.TimeoutError:
+                    raise Exception("Connection timed out after 30 seconds")
                     
                 logger.info("Subscribing to LTP for stocks...")
                 feed.subscribe_ltp(instruments_list, on_data_received=on_data_received)
-                
-                logger.info("Subscribing to Live Index values for NIFTY and SENSEX...")
-                feed.subscribe_index_value(index_instruments, on_data_received=on_index_data_received)
                 
                 logger.info("Consuming feed...")
                 feed.consume()
@@ -337,23 +379,6 @@ def start_groww_feed():
                 fallback_start = time.time()
                 while time.time() - fallback_start < 300:
                     time.sleep(2)  # Wait a bit between global polls to avoid hitting the 10 req/s hard limit
-                    
-                    # Fallback for Indices
-                    try:
-                        for idx_symbol, idx_exch in [("NIFTY", "NSE"), ("SENSEX", "BSE")]:
-                            q = groww.get_quote(idx_symbol, idx_exch, "CASH")
-                            if q and 'last_price' in q:
-                                c = q.get('ohlc', {}).get('close', q['last_price'])
-                                payload = {"INDICES": {idx_symbol: {
-                                    "ltp": q['last_price'],
-                                    "dayChange": q['last_price'] - c,
-                                    "dayChangePerc": ((q['last_price'] - c) / c * 100) if c else 0
-                                }}}
-                                if manager.loop and manager.loop.is_running():
-                                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(payload)), manager.loop)
-                            time.sleep(0.15)
-                    except Exception:
-                        pass
                     
                     # Fallback for Stocks
                     for symbol, token in tokens.items():

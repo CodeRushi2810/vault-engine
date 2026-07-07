@@ -123,6 +123,10 @@ def main():
     # Pre-generate static previous close prices for the UI
     generate_previous_close()
     
+    logger.info(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Bootstrapping missing historical candles (Auto Catch-Up)...")
+    subprocess.run(["python", "-m", "core.fetch_data"])
+    logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Historical data fully synchronized.\n")
+    
     def start_and_wait(command, ready_strings):
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         ready_event = threading.Event()

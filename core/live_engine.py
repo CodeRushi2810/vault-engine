@@ -88,9 +88,9 @@ class LiveExecutionEngine:
 
     async def evaluate_and_trade(self, candles_dict, candle_ts):
         now = datetime.datetime.now()
-        logger.info(f"--- PRE-EMPTIVE AI EVALUATION ({candle_ts.strftime('%H:%M')}) ---")
         logger.info(f"Step 1: Successfully fetched live ticks for {len(candles_dict)} stocks.")
         logger.info("Step 2: Feeding data into AETHER Core...")
+        logger.info("Step 3: Evaluating ML models and dispatching Discord alerts...")
         
         for stock, c in candles_dict.items():
             csv_path = os.path.join(BASE_DIR, "data", stock, "15m_candles.csv")
@@ -121,17 +121,14 @@ class LiveExecutionEngine:
                 logger.error(f"Error processing {stock} live tick: {e}")
                 
         # Save state and update dashboard with true clock time
-        logger.info("Step 3: Synching AETHER states to internal memory...")
+        logger.info("Step 4: Synching AETHER states to internal memory...")
         actual_now_str = now.strftime('%Y-%m-%d %H:%M:%S')
         last_prices = {stock: c['close'] for stock, c in candles_dict.items()}
         self.engine.save_state(self.out_file, actual_now_str, last_prices)
         
-        logger.info("Step 4: Compiling real-time Dashboard payload...")
+        logger.info("Step 5: Compiling real-time Dashboard payload...")
         try:
             generate_report()
-            logger.info("==================================================")
-            logger.info("        PIPELINE SYNCHRONIZATION COMPLETE         ")
-            logger.info("==================================================\n")
         except Exception as e:
             logger.error(f"Error generating dashboard JSON: {e}")
 
@@ -164,6 +161,9 @@ class LiveExecutionEngine:
                     logger.error(f"Error saving finalized {stock} candle: {e}")
                     
         logger.info(f"Successfully finalized {success_count} candles for the {ts_str} block.")
+        logger.info("===================================")
+        logger.info(f"{candle_ts.strftime('%H:%M')} AETHER CYCLE COMPLETE")
+        logger.info("===================================\n")
 
     def _catchup_single_stock(self, stock, now, latest_possible_candle):
         csv_path = os.path.join(BASE_DIR, "data", stock, "15m_candles.csv")
@@ -245,28 +245,73 @@ class LiveExecutionEngine:
             logger.warning(f"[{now.strftime('%H:%M:%S')}] System Health Check Failed. Pausing Pre-emptive Evaluation.")
             return
 
-        logger.info(f"[{now.strftime('%H:%M:%S')}] AETHER Clock synchronized. Launching pre-emptive cycle.")
+        start_time = time.time()
         candle_ts = self.get_candle_start_time(now)
+        logger.info("===================================")
+        logger.info(f"STARTING {candle_ts.strftime('%H:%M')} AETHER CYCLE")
+        logger.info("===================================")
+        logger.info("AETHER Clock synchronized. Launching pre-emptive cycle.")
         end_dt = now.replace(hour=16, minute=0, second=0)
         candles = self.fetch_live_candles(candle_ts, end_dt)
         await self.evaluate_and_trade(candles, candle_ts)
+        
+        # Log process metrics
+        try:
+            import json, os
+            metrics_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "process_metrics.json")
+            data = {}
+            if os.path.exists(metrics_file):
+                with open(metrics_file, 'r') as f: data = json.load(f)
+            dur = time.time() - start_time
+            if "AI Evaluation Cycle" not in data:
+                data["AI Evaluation Cycle"] = {"avg": dur, "count": 1, "last": dur}
+            else:
+                c = data["AI Evaluation Cycle"]["count"]
+                data["AI Evaluation Cycle"]["avg"] = ((data["AI Evaluation Cycle"]["avg"] * c) + dur) / (c + 1)
+                data["AI Evaluation Cycle"]["count"] += 1
+                data["AI Evaluation Cycle"]["last"] = dur
+            with open(metrics_file, 'w') as f: json.dump(data, f)
+        except Exception: pass
 
     async def trigger_finalize(self):
-        if get_market_status() != "OPEN": return
         now = datetime.datetime.now()
+        status = get_market_status()
+        if status != "OPEN":
+            if not (status == "POST_MARKET" and now.hour == 15 and now.minute == 30):
+                return
+
         health = get_system_health()
         if not health["overall_ok"]:
             return
 
+        start_time = time.time()
         candle_ts = self.get_candle_start_time(now) - datetime.timedelta(minutes=15)
-        logger.info(f"[{now.strftime('%H:%M:%S')}] Finalizing {candle_ts.strftime('%H:%M:%S')} block...")
+        logger.info(f"Step 6: Finalizing {candle_ts.strftime('%H:%M:%S')} block...")
         end_dt = now.replace(hour=16, minute=0, second=0)
         candles = self.fetch_live_candles(candle_ts, end_dt)
         self.save_finalized_candles(candles, candle_ts)
+        
+        # Log process metrics
+        try:
+            import json, os
+            metrics_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "process_metrics.json")
+            data = {}
+            if os.path.exists(metrics_file):
+                with open(metrics_file, 'r') as f: data = json.load(f)
+            dur = time.time() - start_time
+            if "Block Finalization" not in data:
+                data["Block Finalization"] = {"avg": dur, "count": 1, "last": dur}
+            else:
+                c = data["Block Finalization"]["count"]
+                data["Block Finalization"]["avg"] = ((data["Block Finalization"]["avg"] * c) + dur) / (c + 1)
+                data["Block Finalization"]["count"] += 1
+                data["Block Finalization"]["last"] = dur
+            with open(metrics_file, 'w') as f: json.dump(data, f)
+        except Exception: pass
 
     def schedule_tasks(self):
-        self.scheduler.add_job(self.trigger_preemptive, CronTrigger(minute='14,29,44,59', second='45'))
-        self.scheduler.add_job(self.trigger_finalize, CronTrigger(minute='0,15,30,45', second='5'))
+        self.scheduler.add_job(self.trigger_preemptive, CronTrigger(minute='14,29,44,59', second='45'), misfire_grace_time=60)
+        self.scheduler.add_job(self.trigger_finalize, CronTrigger(minute='0,15,30,45', second='5'), misfire_grace_time=60)
         self.scheduler.start()
 
     async def run(self):
