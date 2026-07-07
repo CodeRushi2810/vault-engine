@@ -204,6 +204,12 @@ def main():
             
     except KeyboardInterrupt:
         logger.info("\nPipeline stopped by user. Cleaning up processes...")
+        try:
+            from core.data_utils import push_dashboard_to_mongo
+            push_dashboard_to_mongo()
+        except Exception as e:
+            logger.error(f"Error pushing to mongo on exit: {e}")
+            
         if feed_process and feed_process.poll() is None:
             feed_process.terminate()
         if engine_process and engine_process.poll() is None:

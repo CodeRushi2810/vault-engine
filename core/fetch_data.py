@@ -161,8 +161,10 @@ def main():
         start_time_15m = end_time - timedelta(days=90) # Default max available length for 15m
         is_15m_up_to_date = False
         
+        original_rows = 0
         if os.path.exists(file_15m):
             df_existing_15m = pd.read_csv(file_15m)
+            original_rows = len(df_existing_15m)
             if not df_existing_15m.empty:
                 last_ts = pd.to_datetime(df_existing_15m['Timestamp'].max())
                 
@@ -176,22 +178,16 @@ def main():
                 start_time_15m = last_ts
                 if start_time_15m < end_time - timedelta(days=90):
                     start_time_15m = end_time - timedelta(days=90)
-                logger.info(f"Found existing 15m data for {stock}. Last timestamp: {last_ts}.")
-            else:
-                logger.info(f"15m file exists but empty for {stock}.")
-        else:
-            logger.info(f"No existing 15m data for {stock}.")
             
         if is_15m_up_to_date:
-            logger.info(f"15m data is already up to date for {stock}. Skipping fetch.")
+            pass # Skip logging to keep it clean if already up to date
         elif start_time_15m < end_time:
-            logger.info(f"Fetching 15m candles from Groww for {stock} since {start_time_15m}...")
             df_15m = get_groww_history(groww, stock, groww.CANDLE_INTERVAL_MIN_15, start_time_15m, end_time)
             if not df_15m.empty:
                 total_15m = update_csv_with_new_data(file_15m, df_15m, date_only=False)
-                logger.info(f"Updated 15m candles for {stock} (Total rows: {total_15m}).")
-            else:
-                logger.info(f"No new 15m data fetched for {stock}.")
+                inserted = total_15m - original_rows
+                if inserted > 0:
+                    logger.info(f"Synced {stock}. Inserted {inserted} new 15m candles.")
                 
 
         

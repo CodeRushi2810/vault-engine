@@ -129,6 +129,8 @@ class LiveExecutionEngine:
         logger.info("Step 5: Compiling real-time Dashboard payload...")
         try:
             generate_report()
+            from core.data_utils import push_dashboard_to_mongo
+            push_dashboard_to_mongo()
         except Exception as e:
             logger.error(f"Error generating dashboard JSON: {e}")
 

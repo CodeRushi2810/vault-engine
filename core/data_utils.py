@@ -64,3 +64,49 @@ def get_previous_close_prices():
             logger.warning(f"Error reading JSON fallback: {e}")
             
     return close_prices
+
+def push_dashboard_to_mongo():
+    logger.info("Pushing dashboard data to MongoDB offline snapshot...")
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    json_path = os.path.join(BASE_DIR, "data", "dashboard_data.json")
+    if not os.path.exists(json_path):
+        logger.error("dashboard_data.json not found.")
+        return
+    
+    try:
+        from pymongo import MongoClient
+        load_dotenv(os.path.join(BASE_DIR, ".env"))
+        mongo_uri = os.getenv("MONGO_URI")
+        if not mongo_uri:
+            logger.error("MONGO_URI not set.")
+            return
+            
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+            
+        # Ensure market_data exists so the frontend can calculate 1D PnL when offline
+        if "market_data" not in data or not data["market_data"]:
+            data["market_data"] = {}
+            import pandas as pd
+            from core.config import STOCKS
+            for stock in STOCKS:
+                csv_path = os.path.join(BASE_DIR, "data", stock, "15m_candles.csv")
+                if os.path.exists(csv_path):
+                    try:
+                        df = pd.read_csv(csv_path)
+                        if not df.empty:
+                            # Use the most recent 15m close price as the offline LTP
+                            data["market_data"][stock] = float(df.iloc[-1]['Close'])
+                    except Exception:
+                        pass
+            
+        client = MongoClient(mongo_uri)
+        db = client['vault_db']
+        collection = db['dashboard_snapshot']
+        
+        # Replace existing snapshot with the new one
+        collection.delete_many({})
+        collection.insert_one({"data": data})
+        logger.info("Successfully pushed dashboard snapshot to MongoDB.")
+    except Exception as e:
+        logger.error(f"Failed to push dashboard snapshot to MongoDB: {e}")
