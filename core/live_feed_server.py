@@ -453,35 +453,32 @@ async def test_notification(req: NotificationTestRequest):
     success = send_discord_message(msg)
     return {"success": success, "message": msg}
 
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "trade_settings.json")
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "system_config.json")
 
-def load_trade_settings():
+def load_system_config():
+    default_config = {"global": {"engineActive": True, "allowBuy": True, "allowSell": True}, "stocks": {}}
     if not os.path.exists(SETTINGS_FILE):
-        return {}
+        return default_config
     with open(SETTINGS_FILE, "r") as f:
         try:
             return json.load(f)
         except:
-            return {}
+            return default_config
 
-def save_trade_settings(settings):
+def save_system_config(config):
     with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings, f, indent=4)
+        json.dump(config, f, indent=4)
 
-@app.get("/api/trade_settings")
-async def get_trade_settings():
-    return load_trade_settings()
+@app.get("/api/config")
+async def get_system_config():
+    return load_system_config()
 
-class TradeSettingUpdate(BaseModel):
-    stock: str
-    active: bool
+from typing import Dict, Any
 
-@app.post("/api/trade_settings")
-async def update_trade_setting(req: TradeSettingUpdate):
-    settings = load_trade_settings()
-    settings[req.stock] = req.active
-    save_trade_settings(settings)
-    return {"success": True, "settings": settings}
+@app.post("/api/config")
+async def update_system_config(config: Dict[str, Any]):
+    save_system_config(config)
+    return {"success": True, "config": config}
 
 if __name__ == "__main__":
     uvicorn.run("core.live_feed_server:app", host="0.0.0.0", port=8000, reload=False, access_log=False, log_level="warning")

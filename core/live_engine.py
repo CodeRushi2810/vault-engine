@@ -163,9 +163,8 @@ class LiveExecutionEngine:
                     logger.error(f"Error saving finalized {stock} candle: {e}")
                     
         logger.info(f"Successfully finalized {success_count} candles for the {ts_str} block.")
-        logger.info("===================================")
-        logger.info(f"{candle_ts.strftime('%H:%M')} AETHER CYCLE COMPLETE")
-        logger.info("===================================\n")
+        logger.info(f"\033[1;36m{candle_ts.strftime('%H:%M')} AETHER CYCLE COMPLETE\033[0m")
+        logger.info("\033[1;36m==================================================\033[0m\n")
 
     def _catchup_single_stock(self, stock, now, latest_possible_candle):
         csv_path = os.path.join(BASE_DIR, "data", stock, "15m_candles.csv")
@@ -249,9 +248,8 @@ class LiveExecutionEngine:
 
         start_time = time.time()
         candle_ts = self.get_candle_start_time(now)
-        logger.info("===================================")
-        logger.info(f"STARTING {candle_ts.strftime('%H:%M')} AETHER CYCLE")
-        logger.info("===================================")
+        logger.info("\033[1;36m==================================================\033[0m")
+        logger.info(f"\033[1;36mSTARTING {candle_ts.strftime('%H:%M')} AETHER CYCLE\033[0m")
         logger.info("AETHER Clock synchronized. Launching pre-emptive cycle.")
         end_dt = now.replace(hour=16, minute=0, second=0)
         candles = self.fetch_live_candles(candle_ts, end_dt)

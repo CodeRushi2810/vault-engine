@@ -17,7 +17,7 @@ def run_script(script_path):
         exit(1)
 
 def generate_report():
-    logger.info(f"\n{'='*50}\nGenerating JSON Payload for Dashboard...\n{'='*50}")
+    logger.info("Generating JSON Payload for Dashboard...")
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     log_file = os.path.join(BASE_DIR, "data", "paper_trade_logs.csv")
     

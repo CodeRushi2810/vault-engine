@@ -191,6 +191,27 @@ class StateMachineEngine:
             
             # Pure Diamond Hands Exit: ONLY sell when RSI hits 70 (Overbought) AND Net Average is 3% in profit!
             should_exit = (rsi_val >= 70 and price >= avg_price * 1.03)
+            
+            import json
+            settings_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "system_config.json")
+            can_sell = True
+            if os.path.exists(settings_file):
+                try:
+                    with open(settings_file, "r") as f:
+                        config = json.load(f)
+                        global_sell = config.get("global", {}).get("allowSell", True)
+                        engine_active = config.get("global", {}).get("engineActive", True)
+                        
+                        stock_config = config.get("stocks", {}).get(stock, {})
+                        stock_sell = stock_config.get("allowSell", True)
+                        
+                        # Note: we bypass stock_active here so that users can liquidate disabled stocks
+                        if not (engine_active and global_sell and stock_sell):
+                            can_sell = False
+                except:
+                    pass
+            
+            should_exit = should_exit and can_sell
 
             for pos in stock_positions[:]:
                 # Update watermark
@@ -238,12 +259,19 @@ class StateMachineEngine:
         can_trade = len([p for p in self.open_positions if p.stock == stock]) == 0 or price <= last_entry_price * 0.95
         
         import json
-        settings_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "trade_settings.json")
+        settings_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "system_config.json")
         if os.path.exists(settings_file):
             try:
                 with open(settings_file, "r") as f:
-                    settings = json.load(f)
-                    if not settings.get(stock, True):
+                    config = json.load(f)
+                    global_buy = config.get("global", {}).get("allowBuy", True)
+                    engine_active = config.get("global", {}).get("engineActive", True)
+                    
+                    stock_config = config.get("stocks", {}).get(stock, {})
+                    stock_active = stock_config.get("active", True)
+                    stock_buy = stock_config.get("allowBuy", True)
+                    
+                    if not (engine_active and global_buy and stock_active and stock_buy):
                         can_trade = False
             except:
                 pass
@@ -287,13 +315,17 @@ class StateMachineEngine:
                 prob = self.ml_model.predict_proba(features_df)[0][1]
                 
                 if prob > 0.80:
-                    allocation_pct = 0.30
-                elif prob > 0.60:
-                    allocation_pct = 0.20
-                else:
                     allocation_pct = 0.10
+                elif prob > 0.60:
+                    allocation_pct = 0.075
+                else:
+                    allocation_pct = 0.05
                     
-                invest_amount = self.balance * allocation_pct
+                total_portfolio_value = self.balance + sum(p.cost for p in self.open_positions)
+                invest_amount = total_portfolio_value * allocation_pct
+                
+                invest_amount = max(invest_amount, 10000)
+                invest_amount = min(invest_amount, self.balance)
                 
                 if invest_amount >= price:
                     shares = int(invest_amount // price)
