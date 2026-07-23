@@ -144,7 +144,7 @@ def main():
     end_time = datetime.now()
     is_market_open, last_trading_date = get_market_status()
 
-    logger.info("\nStarting historical 15m candle update for Live Trading...")
+    logger.info("Starting historical 15m candle update for Live Trading...")
     
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_dir = os.path.join(BASE_DIR, "data")
@@ -184,6 +184,11 @@ def main():
         elif start_time_15m < end_time:
             df_15m = get_groww_history(groww, stock, groww.CANDLE_INTERVAL_MIN_15, start_time_15m, end_time)
             if not df_15m.empty:
+                if is_market_open:
+                    minute = (end_time.minute // 15) * 15
+                    current_candle_start = end_time.replace(minute=minute, second=0, microsecond=0)
+                    df_15m = df_15m[df_15m['Timestamp'] < current_candle_start]
+                    
                 total_15m = update_csv_with_new_data(file_15m, df_15m, date_only=False)
                 inserted = total_15m - original_rows
                 if inserted > 0:

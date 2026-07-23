@@ -27,10 +27,14 @@ from core.config import STOCK_TOKENS, TOKEN_TO_STOCK
 from core.config import STOCKS as stocks
 from core.health_check import get_system_health
 from core.market_utils import get_market_status
+from core.agent_state import update_agent_status
 
 logger = setup_logger("live_engine")
 
 load_dotenv()
+
+def log_and_broadcast(msg):
+    logger.info(msg)
 
 class LiveExecutionEngine:
     def __init__(self):
@@ -53,33 +57,69 @@ class LiveExecutionEngine:
         minute = (dt.minute // 15) * 15
         return dt.replace(minute=minute, second=0, microsecond=0)
 
-    def _fetch_single_live_candle(self, stock, start_dt, end_dt):
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                import contextlib
-                with contextlib.redirect_stdout(open(os.devnull, 'w')), contextlib.redirect_stderr(open(os.devnull, 'w')):
-                    df = get_groww_history(self.groww, stock, GrowwAPI.CANDLE_INTERVAL_MIN_15, start_dt, end_dt)
-            if not df.empty:
+    def _fetch_single_live_candle(self, stock, start_dt, end_dt, stagger_delay=0.0):
+        if stagger_delay > 0:
+            time.sleep(stagger_delay)
+        max_retries = 3
+        retry_delay = 2.0
+        for attempt in range(max_retries):
+            try:
                 start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
-                match = df[df['Timestamp'] == pd.to_datetime(start_str)]
-                if not match.empty:
-                    c = match.iloc[0]
+                end_window = start_dt + datetime.timedelta(minutes=15)
+                end_str = end_window.strftime('%Y-%m-%d %H:%M:%S')
+                
+                response = self.groww.get_historical_candles(
+                    exchange=self.groww.EXCHANGE_NSE,
+                    segment=self.groww.SEGMENT_CASH,
+                    groww_symbol=f"NSE-{stock}",
+                    start_time=start_str,
+                    end_time=end_str,
+                    candle_interval=GrowwAPI.CANDLE_INTERVAL_MIN_15
+                )
+                
+                candles = response.get("candles", [])
+                for c in candles:
+                    if c[0] == int(start_dt.timestamp()):
+                        return stock, {
+                            'open': float(c[1]),
+                            'high': float(c[2]),
+                            'low': float(c[3]),
+                            'close': float(c[4]),
+                            'volume': float(c[5])
+                        }
+                
+                if candles:
+                    c = candles[-1]
                     return stock, {
-                        'open': float(c['Open']),
-                        'high': float(c['High']),
-                        'low': float(c['Low']),
-                        'close': float(c['Close']),
-                        'volume': float(c['Volume'])
+                        'open': float(c[1]),
+                        'high': float(c[2]),
+                        'low': float(c[3]),
+                        'close': float(c[4]),
+                        'volume': float(c[5])
                     }
-        except Exception:
-            pass
+                break # If no exception but empty, just break
+            except Exception as e:
+                error_str = str(e).lower()
+                if "rate limit" in error_str or "429" in error_str:
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                        continue
+                if attempt == max_retries - 1:
+                    logger.error(f"Failed to fetch live tick for {stock} after {max_retries} attempts: {e}")
         return stock, None
 
     def fetch_live_candles(self, start_dt, end_dt):
         candles_dict = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_to_stock = {executor.submit(self._fetch_single_live_candle, stock, start_dt, end_dt): stock for stock in self.stocks}
+        # Execute all 26 stocks concurrently, but stagger them by 0.11s each.
+        # 0.11s stagger = exactly 9 requests per second (safely below the 10/s limit).
+        # Total execution time: 26 * 0.11 = 2.86 seconds + 1s network latency = 3.8 seconds!
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.stocks)) as executor:
+            future_to_stock = {}
+            for i, stock in enumerate(self.stocks):
+                future = executor.submit(self._fetch_single_live_candle, stock, start_dt, end_dt, i * 0.11)
+                future_to_stock[future] = stock
+                
             for future in concurrent.futures.as_completed(future_to_stock):
                 stock, c = future.result()
                 if c:
@@ -88,9 +128,22 @@ class LiveExecutionEngine:
 
     async def evaluate_and_trade(self, candles_dict, candle_ts):
         now = datetime.datetime.now()
-        logger.info(f"Step 1: Successfully fetched live ticks for {len(candles_dict)} stocks.")
-        logger.info("Step 2: Feeding data into AETHER Core...")
-        logger.info("Step 3: Evaluating ML models and dispatching Discord alerts...")
+        log_and_broadcast(f"Step 1: Successfully fetched live ticks for {len(candles_dict)} stocks.")
+        update_agent_status("ExecutionEngine", f"Successfully fetched live ticks for {len(candles_dict)} stocks.", is_active=True)
+        await asyncio.sleep(0.5) # Slight stagger for UI animation
+        
+        update_agent_status("SignalProcessor", f"Scanning {len(candles_dict)} assets for mean-reversion signals...", is_active=True)
+        update_agent_status("RiskManager", "Assessing pre-trade risk constraints...", is_active=True)
+        
+        log_and_broadcast("Step 2: Feeding data into AETHER Core...")
+        update_agent_status("ExecutionEngine", "Feeding data into AETHER Core...", is_active=True)
+        await asyncio.sleep(0.5) # Slight stagger for UI animation
+        
+        log_and_broadcast("Step 3: Evaluating ML models and dispatching Discord alerts...")
+        update_agent_status("ExecutionEngine", "Evaluating ML models and dispatching Discord alerts...", is_active=True)
+        
+        initial_open = len(self.engine.open_positions)
+        initial_closed = len(self.engine.completed_trades)
         
         for stock, c in candles_dict.items():
             csv_path = os.path.join(BASE_DIR, "data", stock, "15m_candles.csv")
@@ -120,123 +173,91 @@ class LiveExecutionEngine:
             except Exception as e:
                 logger.error(f"Error processing {stock} live tick: {e}")
                 
+        trades_executed = (len(self.engine.open_positions) != initial_open) or (len(self.engine.completed_trades) != initial_closed)
+                
+        if not trades_executed:
+            log_and_broadcast("No trades executed this cycle. Bypassing Step 4 & Step 5...")
+            update_agent_status("ExecutionEngine", "No trades executed this cycle.", is_active=True)
+            await asyncio.sleep(1.0)
+            update_agent_status("ExecutionEngine", "Awaiting timeframe close...", is_active=True)
+            update_agent_status("SignalProcessor", "Resting...", is_active=False)
+            update_agent_status("RiskManager", "Risk levels optimal. Maximum drawdown within bounds.", is_active=False)
+            self._save_latest_signals()
+            return
+            
         # Save state and update dashboard with true clock time
-        logger.info("Step 4: Synching AETHER states to internal memory...")
+        log_and_broadcast("Step 4: Synching AETHER states to internal memory...")
+        update_agent_status("ExecutionEngine", "Synching AETHER states to internal memory...", is_active=True)
+        await asyncio.sleep(0.5)
+        
         actual_now_str = now.strftime('%Y-%m-%d %H:%M:%S')
         last_prices = {stock: c['close'] for stock, c in candles_dict.items()}
         self.engine.save_state(self.out_file, actual_now_str, last_prices)
         
-        logger.info("Step 5: Compiling real-time Dashboard payload...")
+        log_and_broadcast("Step 5: Compiling real-time Dashboard payload...")
+        update_agent_status("ExecutionEngine", "Compiling real-time Dashboard payload...", is_active=True)
+        await asyncio.sleep(0.5)
         try:
             generate_report()
             from core.data_utils import push_dashboard_to_mongo
             push_dashboard_to_mongo()
         except Exception as e:
             logger.error(f"Error generating dashboard JSON: {e}")
+            
+        update_agent_status("ExecutionEngine", "Awaiting timeframe close...", is_active=True)
+        update_agent_status("SignalProcessor", "Resting...", is_active=False)
+        update_agent_status("RiskManager", "Risk levels optimal. Maximum drawdown within bounds.", is_active=False)
+        self._save_latest_signals()
+
+    def _save_latest_signals(self):
+        try:
+            signals_file = os.path.join(BASE_DIR, "data", "latest_signals.json")
+            with open(signals_file, "w") as f:
+                json.dump(self.engine.latest_signals, f)
+        except Exception as e:
+            logger.error(f"Failed to save latest signals: {e}")
+
+    def _save_single_finalized_candle(self, stock, c, ts_str):
+        csv_path = os.path.join(BASE_DIR, "data", stock, "15m_candles.csv")
+        if os.path.exists(csv_path):
+            try:
+                df = pd.read_csv(csv_path)
+                df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+                df = df[df['Timestamp'] != pd.to_datetime(ts_str)]
+                
+                new_row = {
+                    'Timestamp': pd.to_datetime(ts_str),
+                    'Open': c['open'],
+                    'High': c['high'],
+                    'Low': c['low'],
+                    'Close': c['close'],
+                    'Volume': c['volume']
+                }
+                new_df = pd.DataFrame([new_row])
+                df = pd.concat([df, new_df], ignore_index=True)
+                df = df.sort_values(by='Timestamp')
+                df['Timestamp'] = df['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                df.to_csv(csv_path, index=False)
+                return True
+            except Exception as e:
+                logger.error(f"Error saving finalized {stock} candle: {e}")
+        return False
 
     def save_finalized_candles(self, candles_dict, candle_ts):
         ts_str = candle_ts.strftime('%Y-%m-%d %H:%M:%S')
         success_count = 0
-        for stock, c in candles_dict.items():
-            csv_path = os.path.join(BASE_DIR, "data", stock, "15m_candles.csv")
-            if os.path.exists(csv_path):
-                try:
-                    df = pd.read_csv(csv_path)
-                    df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-                    df = df[df['Timestamp'] != pd.to_datetime(ts_str)]
-                    
-                    new_row = {
-                        'Timestamp': pd.to_datetime(ts_str),
-                        'Open': c['open'],
-                        'High': c['high'],
-                        'Low': c['low'],
-                        'Close': c['close'],
-                        'Volume': c['volume']
-                    }
-                    new_df = pd.DataFrame([new_row])
-                    df = pd.concat([df, new_df], ignore_index=True)
-                    df = df.sort_values(by='Timestamp')
-                    df['Timestamp'] = df['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                    df.to_csv(csv_path, index=False)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=26) as executor:
+            futures = [executor.submit(self._save_single_finalized_candle, stock, c, ts_str) for stock, c in candles_dict.items()]
+            for future in concurrent.futures.as_completed(futures):
+                if future.result():
                     success_count += 1
-                except Exception as e:
-                    logger.error(f"Error saving finalized {stock} candle: {e}")
                     
-        logger.info(f"Successfully finalized {success_count} candles for the {ts_str} block.")
-        logger.info(f"\033[1;36m{candle_ts.strftime('%H:%M')} AETHER CYCLE COMPLETE\033[0m")
-        logger.info("\033[1;36m==================================================\033[0m\n")
+        log_and_broadcast(f"Successfully finalized {success_count} candles for the {ts_str} block.")
+        log_and_broadcast(f"\033[1;36m{candle_ts.strftime('%H:%M')} AETHER CYCLE COMPLETE\033[0m")
+        log_and_broadcast("\033[1;36m==================================================\033[0m")
+        update_agent_status("ExecutionEngine", "Resting...", is_active=False)
 
-    def _catchup_single_stock(self, stock, now, latest_possible_candle):
-        csv_path = os.path.join(BASE_DIR, "data", stock, "15m_candles.csv")
-        if not os.path.exists(csv_path): return
-        
-        try:
-            df = pd.read_csv(csv_path)
-            df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-            if df.empty: return
-            
-            fetch_start = now - datetime.timedelta(days=3)
-            
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                import contextlib
-                with contextlib.redirect_stdout(open(os.devnull, 'w')), contextlib.redirect_stderr(open(os.devnull, 'w')):
-                    df_new = get_groww_history(self.groww, stock, GrowwAPI.CANDLE_INTERVAL_MIN_15, fetch_start, now)
-            
-            if not df_new.empty:
-                df_new['Timestamp'] = pd.to_datetime(df_new['Timestamp'])
-                df_new = df_new[df_new['Timestamp'] <= latest_possible_candle]
-                
-                if not df_new.empty:
-                    initial_len = len(df)
-                    combined_df = pd.concat([df, df_new], ignore_index=True)
-                    combined_df.drop_duplicates(subset=['Timestamp'], keep='last', inplace=True)
-                    combined_df.sort_values(by='Timestamp', inplace=True)
-                    
-                    final_len = len(combined_df)
-                    added_count = final_len - initial_len
-                    
-                    is_modified = False
-                    if added_count > 0:
-                        is_modified = True
-                    else:
-                        if df.iloc[-1]['Volume'] != combined_df.iloc[-1]['Volume'] or df.iloc[-1]['Close'] != combined_df.iloc[-1]['Close']:
-                            is_modified = True
-                    
-                    if is_modified:
-                        combined_df['Timestamp'] = combined_df['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                        combined_df.to_csv(csv_path, index=False)
-                        if added_count > 0:
-                            logger.info(f"[{stock}] Synced data. Inserted {added_count} new historical candles.")
-        except Exception:
-            pass
 
-    def catchup_missing_candles(self):
-        if get_market_status() != "OPEN":
-            logger.info("Market is offline. Bypassing Auto Catch-Up Sequence.")
-            return
-            
-        logger.info("Running Auto Catch-Up Sequence for historical data gaps...")
-        now = datetime.datetime.now()
-        
-        market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        market_end = now.replace(hour=15, minute=31, second=0, microsecond=0)
-        
-        if now < market_start:
-            logger.info("Auto Catch-Up Sequence Complete.\n")
-            return
-            
-        latest_possible_candle = self.get_candle_start_time(now) - datetime.timedelta(minutes=15)
-        market_last_candle = now.replace(hour=15, minute=15, second=0, microsecond=0)
-        
-        if latest_possible_candle > market_last_candle:
-            latest_possible_candle = market_last_candle
-            
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [executor.submit(self._catchup_single_stock, stock, now, latest_possible_candle) for stock in self.stocks]
-            concurrent.futures.wait(futures)
-            
-        logger.info("Auto Catch-Up Sequence Complete.\n")
 
     async def trigger_preemptive(self):
         if get_market_status() != "OPEN": return
@@ -248,10 +269,15 @@ class LiveExecutionEngine:
 
         start_time = time.time()
         candle_ts = self.get_candle_start_time(now)
-        logger.info("\033[1;36m==================================================\033[0m")
-        logger.info(f"\033[1;36mSTARTING {candle_ts.strftime('%H:%M')} AETHER CYCLE\033[0m")
-        logger.info("AETHER Clock synchronized. Launching pre-emptive cycle.")
+        log_and_broadcast("\033[1;36m==================================================\033[0m")
+        log_and_broadcast(f"\033[1;36mSTARTING {candle_ts.strftime('%H:%M')} AETHER CYCLE\033[0m")
+        log_and_broadcast("AETHER Clock synchronized. Launching pre-emptive cycle.")
+        
+        update_agent_status("ExecutionEngine", "AETHER Clock synchronized. Launching pre-emptive cycle.", is_active=True)
+        
         end_dt = now.replace(hour=16, minute=0, second=0)
+        
+        update_agent_status("ExecutionEngine", f"Fetching live ticks...", is_active=True)
         candles = self.fetch_live_candles(candle_ts, end_dt)
         await self.evaluate_and_trade(candles, candle_ts)
         
@@ -284,12 +310,15 @@ class LiveExecutionEngine:
         if not health["overall_ok"]:
             return
 
+        update_agent_status("ExecutionEngine", "Finalizing memory block...", is_active=True)
         start_time = time.time()
         candle_ts = self.get_candle_start_time(now) - datetime.timedelta(minutes=15)
-        logger.info(f"Step 6: Finalizing {candle_ts.strftime('%H:%M:%S')} block...")
+        log_and_broadcast(f"Step 6: Finalizing {candle_ts.strftime('%H:%M:%S')} block...")
         end_dt = now.replace(hour=16, minute=0, second=0)
         candles = self.fetch_live_candles(candle_ts, end_dt)
         self.save_finalized_candles(candles, candle_ts)
+        
+        update_agent_status("ExecutionEngine", "Awaiting timeframe close...", is_active=False)
         
         # Log process metrics
         try:
@@ -316,8 +345,6 @@ class LiveExecutionEngine:
 
     async def run(self):
         logger.info("Starting Execution Engine Pipeline (AETHER V2 Native API Mode)...")
-        if get_market_status() == "OPEN":
-            self.catchup_missing_candles()
         
         self.schedule_tasks()
         

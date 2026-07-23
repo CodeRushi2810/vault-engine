@@ -36,8 +36,15 @@ def get_system_health():
         "auth_ok": False,
         "api_ok": False,
         "db_ok": False,
-        "overall_ok": False
+        "overall_ok": False,
+        "memory_percent": 0
     }
+    
+    try:
+        import psutil
+        health["memory_percent"] = psutil.virtual_memory().percent
+    except Exception:
+        pass
     
     # 1. Internet Check
     is_connected, latency = is_connected_to_internet()

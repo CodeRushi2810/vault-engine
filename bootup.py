@@ -14,11 +14,12 @@ from core.market_utils import is_market_open, get_market_status
 from core.data_utils import get_previous_close_prices
 from core.health_check import is_connected_to_internet
 from core.system_logger import setup_logger
+from core.agent_state import update_agent_status
 
 logger = setup_logger("bootup")
 
 def generate_previous_close():
-    logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Injecting previous close and offline prices into dashboard_data.json...")
+    logger.info("Injecting previous close and offline prices into dashboard_data.json...")
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     
     try:
@@ -78,9 +79,9 @@ def generate_previous_close():
         
         with open(json_path, 'w') as f:
             json.dump(data, f)
-        logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] dashboard_data.json successfully updated natively without API calls!")
+        logger.info("dashboard_data.json successfully updated natively without API calls!")
     except Exception as e:
-        logger.error(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Failed to update dashboard_data.json: {e}")
+        logger.error(f"Failed to update dashboard_data.json: {e}")
 
 async def heartbeat_handler(websocket):
     try:
@@ -98,6 +99,7 @@ def run_heartbeat_server():
     asyncio.run(main_server())
 
 def main():
+    update_agent_status("BootupCoordinator", "Initializing AI Live Trading Pipeline...", is_active=True)
     logger.info("="*50)
     logger.info("Starting AI Live Trading Pipeline...")
     logger.info("="*50)
@@ -108,24 +110,27 @@ def main():
     import contextlib
 
     load_dotenv()
-    logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Awaiting internet connection...")
+    logger.info("Awaiting internet connection...")
     while not is_connected_to_internet():
         time.sleep(5)
-    logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Internet connection verified.")
+    logger.info("Internet connection verified.")
     
     from core.auth import get_groww_token
     try:
         token = get_groww_token()
-        logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Authenticated with Groww API. Session Token Cached.")
+        logger.info("Authenticated with Groww API. Session Token Cached.")
     except Exception as e:
-        logger.error(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Groww API Auth Failed: {e}")
+        logger.error(f"Groww API Auth Failed: {e}")
     
     # Pre-generate static previous close prices for the UI
+    update_agent_status("BootupCoordinator", "Generating static previous close prices for the UI...", is_active=True)
     generate_previous_close()
     
-    logger.info(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Bootstrapping missing historical candles (Auto Catch-Up)...")
+    logger.info("Bootstrapping missing historical candles (Auto Catch-Up)...")
+    update_agent_status("BootupCoordinator", "Bootstrapping missing historical candles (Auto Catch-Up)...", is_active=True)
     subprocess.run(["python", "-m", "core.fetch_data"])
-    logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Historical data fully synchronized.\n")
+    logger.info("Historical data fully synchronized.")
+    update_agent_status("BootupCoordinator", "Historical data fully synchronized.", is_active=False)
     
     def start_and_wait(command, ready_strings):
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -144,16 +149,16 @@ def main():
         return process
 
     # 1. Start live_engine.py unconditionally (it handles orders and runs continuously)
-    logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting core/live_engine.py...")
+    logger.info("Starting core/live_engine.py...")
     engine_process = start_and_wait(["python", "-m", "core.live_engine"], ["Starting Execution Engine Pipeline"])
     
-    logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting background WebSocket Heartbeat server on port 8001...")
+    logger.info("Starting background WebSocket Heartbeat server on port 8001...")
     heartbeat_thread = threading.Thread(target=run_heartbeat_server, daemon=True)
     heartbeat_thread.start()
     
     feed_process = start_and_wait(["python", "-m", "core.live_feed_server"], ["Ready to Groww!", "Bypassing Live Feed subscriptions"])
     
-    logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting background Discord listener (core/discord_listener.py)...")
+    logger.info("Starting background Discord listener (core/discord_listener.py)...")
     discord_process = start_and_wait(["python", "-m", "core.discord_listener"], ["Synced", "Logged in as"])
     
     market_state = get_market_status()
@@ -164,27 +169,27 @@ def main():
             
             # Detect transition from OPEN to POST_MARKET
             if current_state == "POST_MARKET" and market_state == "OPEN":
-                logger.info(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Market transitioned to POST_MARKET.")
-                logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Fetching end-of-day 1D candles from Groww API...")
+                logger.info("Market transitioned to POST_MARKET.")
+                logger.info("Fetching end-of-day 1D candles from Groww API...")
                 subprocess.run(["python", "-m", "core.fetch_data"])
                 
             # Detect transition from POST_MARKET to CLOSED
             elif current_state == "CLOSED" and market_state == "POST_MARKET":
-                logger.info(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Market transitioned to CLOSED.")
-                logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Fetching final official VWAP closing prices...")
+                logger.info("Market transitioned to CLOSED.")
+                logger.info("Fetching final official VWAP closing prices...")
                 generate_previous_close()
                 
                 # Restart feed server to refresh tokens and clear cache for the night
-                logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Restarting live_feed_server.py for overnight Dashboard access...")
+                logger.info("Restarting live_feed_server.py for overnight Dashboard access...")
                 feed_process.terminate()
                 feed_process.wait()
                 feed_process = subprocess.Popen(["python", "-m", "core.live_feed_server"])
                 
             # Detect transition from CLOSED to PRE_MARKET
             elif current_state == "PRE_MARKET" and market_state in ["CLOSED", "HOLIDAY", "WEEKEND"]:
-                logger.info(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Market transitioned to PRE_MARKET.")
+                logger.info("Market transitioned to PRE_MARKET.")
                 # Restart feed server to get fresh morning token and warmup connections
-                logger.info(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Restarting live_feed_server.py for morning warmup...")
+                logger.info("Restarting live_feed_server.py for morning warmup...")
                 feed_process.terminate()
                 feed_process.wait()
                 feed_process = subprocess.Popen(["python", "-m", "core.live_feed_server"])
@@ -197,13 +202,15 @@ def main():
                 
             # Log transition to OPEN
             elif current_state == "OPEN" and market_state == "PRE_MARKET":
-                logger.info(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Market transitioned to OPEN. Continuous trading active.")
+                logger.info("Market transitioned to OPEN. Continuous trading active.")
 
+            update_agent_status("BootupCoordinator", f"Pipeline synchronized. Market Status: {current_state}", is_active=False)
+            
             market_state = current_state
             time.sleep(5)
             
     except KeyboardInterrupt:
-        logger.info("\nPipeline stopped by user. Cleaning up processes...")
+        logger.info("Pipeline stopped by user. Cleaning up processes...")
         try:
             from core.data_utils import push_dashboard_to_mongo
             push_dashboard_to_mongo()

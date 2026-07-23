@@ -46,6 +46,7 @@ class StateMachineEngine:
         self.open_positions = []
         self.completed_trades = []
         self.stock_states = {}
+        self.latest_signals = {}
         
         BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.model_file = os.path.join(BASE_DIR, "backtesting", "bot_brain.pkl")
@@ -310,6 +311,9 @@ class StateMachineEngine:
             
             # AGENT 2 (Execution) evaluates the best setup
             if best_signal is not None:
+                # Capture the best signal for the frontend payload
+                self.latest_signals[stock] = best_signal
+                
                 # ML Prediction (Agent 2)
                 features_df = pd.DataFrame([best_signal['features']])
                 prob = self.ml_model.predict_proba(features_df)[0][1]

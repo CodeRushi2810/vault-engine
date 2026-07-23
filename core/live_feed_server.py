@@ -16,6 +16,7 @@ from core.system_logger import setup_logger
 from core.config import STOCK_TOKENS as tokens, TOKEN_TO_STOCK
 from core.health_check import get_system_health
 from core.market_utils import get_market_status
+from core.agent_state import get_all_agent_states, update_agent_status
 logger = setup_logger("live_feed")
 
 # Suppress growwapi logs to prevent raw 'Error:' spam
@@ -29,6 +30,8 @@ async def lifespan(app: FastAPI):
     manager.loop = asyncio.get_running_loop()
     t = threading.Thread(target=start_groww_feed, daemon=True)
     t.start()
+    t2 = threading.Thread(target=tail_vault_log, daemon=True)
+    t2.start()
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -92,12 +95,16 @@ class ConnectionManager:
 manager = ConnectionManager()
 feed = None
 initial_prices = {}
+# Track ticks for NEXUS agent
+nexus_tick_count = 0
+last_nexus_update = time.time()
 internet_status = "ONLINE"
 
 def on_data_received(meta):
-    global feed
+    global feed, nexus_tick_count
     if feed is None: return
     raw_data = feed.get_ltp()
+    nexus_tick_count += 1
     
     # Map tokens to symbols server-side so the frontend doesn't need tokens
     data = {'NSE': {'CASH': {}}}
@@ -113,82 +120,44 @@ def on_data_received(meta):
 
 
 def poll_agents():
+    global nexus_tick_count, last_nexus_update
     while True:
         try:
-            now = datetime.datetime.now()
-            minutes = now.minute % 15
-            seconds = now.second
-            
-            # Simple status simulation for execution engine based on time
-            if minutes == 14 and seconds >= 45:
-                exec_status = "EVALUATING LIVE CANDLES..."
-                exec_color = "text-rose-400"
-                exec_glow = "shadow-[0_0_60px_rgba(244,63,94,0.6)]"
-                exec_bg = "bg-gradient-to-br from-rose-500 to-rose-900"
-            else:
-                remaining_m = 14 - minutes
-                remaining_s = 45 - seconds
-                if remaining_s < 0:
-                    remaining_s += 60
-                    remaining_m -= 1
-                exec_status = f"Awaiting timeframe close... {remaining_m}m {remaining_s}s"
-                exec_color = "text-emerald-400"
-                exec_glow = "shadow-[0_0_50px_rgba(16,185,129,0.3)]"
-                exec_bg = "bg-gradient-to-br from-emerald-500 to-teal-900"
+            now = time.time()
+            # Calculate tick rate for NEXUS
+            elapsed = now - last_nexus_update
+            if elapsed >= 1.0:
+                tps = int(nexus_tick_count / elapsed)
+                nexus_tick_count = 0
+                last_nexus_update = now
                 
+                market_stat = get_market_status()
+                if market_stat == "OPEN" and feed is not None:
+                    update_agent_status("DataFeedServer", f"Consuming NATS stream at {tps} ticks/sec", is_active=True)
+                elif market_stat == "PRE_MARKET":
+                    update_agent_status("DataFeedServer", "REST Polling Indicative Equilibrium Price", is_active=True)
+                else:
+                    update_agent_status("DataFeedServer", f"Market {market_stat}. Waiting for schedule.", is_active=False)
+
+            market_status = get_market_status()
+
+            agents_state = get_all_agent_states()
+            if "ExecutionEngine" in agents_state and not agents_state["ExecutionEngine"].get("is_active"):
+                if market_status == "OPEN":
+                    now_dt = datetime.datetime.now()
+                    minutes = now_dt.minute % 15
+                    seconds = now_dt.second
+                    remaining_m = 14 - minutes
+                    remaining_s = 45 - seconds
+                    if remaining_s < 0:
+                        remaining_s += 60
+                        remaining_m -= 1
+                    agents_state["ExecutionEngine"]["status"] = f"Awaiting timeframe close... {remaining_m}m {remaining_s}s"
+                else:
+                    agents_state["ExecutionEngine"]["status"] = f"Market {market_status}. Engine resting."
+
             payload = {
-                "AGENTS": {
-                    "DataFeedServer": {
-                        "name": "NEXUS",
-                        "role": "Data Feed Server",
-                        "description": "Streams high-frequency market ticks natively from broker.",
-                        "status": "Streaming live ticks for 11 stocks natively...",
-                        "color": "text-cyan-400",
-                        "glow": "shadow-[0_0_40px_rgba(6,182,212,0.4)]",
-                        "bg": "bg-gradient-to-br from-cyan-400 to-blue-900",
-                        "lastActive": now.strftime('%H:%M:%S')
-                    },
-                    "SignalProcessor": {
-                        "name": "LUMINA",
-                        "role": "Signal Processor",
-                        "description": "Filters market noise and synthesizes setup conditions.",
-                        "status": "Scanning active indicators for mean-reversion...",
-                        "color": "text-pink-400",
-                        "glow": "shadow-[0_0_40px_rgba(236,72,153,0.4)]",
-                        "bg": "bg-gradient-to-br from-pink-400 to-fuchsia-900",
-                        "lastActive": now.strftime('%H:%M:%S')
-                    },
-                    "ExecutionEngine": {
-                        "name": "AETHER",
-                        "role": "Execution Engine",
-                        "description": "The central brain. Evaluates models and triggers live market orders.",
-                        "status": exec_status,
-                        "color": exec_color,
-                        "glow": exec_glow,
-                        "bg": exec_bg,
-                        "lastActive": now.strftime('%H:%M:%S')
-                    },
-                    "RiskManager": {
-                        "name": "AEGIS",
-                        "role": "Risk Manager",
-                        "description": "Monitors portfolio drawdowns and manages dynamic capital exposure.",
-                        "status": "Risk levels optimal. Maximum drawdown within bounds.",
-                        "color": "text-purple-400",
-                        "glow": "shadow-[0_0_40px_rgba(168,85,247,0.4)]",
-                        "bg": "bg-gradient-to-br from-purple-400 to-indigo-900",
-                        "lastActive": now.strftime('%H:%M:%S')
-                    },
-                    "BootupCoordinator": {
-                        "name": "ORACLE",
-                        "role": "Coordinator",
-                        "description": "Synchronizes pipeline health and handles auto catch-up sequences.",
-                        "status": "Pipeline synchronized. Auto Catch-Up Sequence armed.",
-                        "color": "text-amber-400",
-                        "glow": "shadow-[0_0_40px_rgba(251,191,36,0.4)]",
-                        "bg": "bg-gradient-to-br from-amber-400 to-orange-900",
-                        "lastActive": now.strftime('%H:%M:%S')
-                    }
-                }
+                "AGENTS": agents_state
             }
             payload["INTERNET_STATUS"] = internet_status
             payload["SYSTEM_STATUS"] = get_system_health()
@@ -208,6 +177,15 @@ def poll_agents():
                 if os.path.exists(metrics_file):
                     with open(metrics_file, 'r') as f:
                         payload["PROCESS_METRICS"] = json.load(f)
+            except Exception:
+                pass
+
+            # Read TOP_SIGNALS
+            try:
+                signals_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "latest_signals.json")
+                if os.path.exists(signals_file):
+                    with open(signals_file, 'r') as f:
+                        payload["TOP_SIGNALS"] = json.load(f)
             except Exception:
                 pass
 
@@ -427,6 +405,46 @@ class NotificationTestRequest(BaseModel):
     sell_price: float = None
     pnl: float = None
     pnl_percent: float = None
+
+def tail_vault_log():
+    log_file = os.path.join(BASE_DIR, "data", "vault.log")
+    if not os.path.exists(log_file):
+        open(log_file, 'a').close()
+    
+    with open(log_file, 'r', encoding='utf-8') as f:
+        f.seek(0, 2)
+        while True:
+            line = f.readline()
+            if not line:
+                time.sleep(0.1)
+                continue
+            
+            clean_msg = line.strip().replace("\033[1;36m", "").replace("\033[0m", "")
+            if manager.loop and manager.loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    manager.broadcast(json.dumps({"ENGINE_LOG": clean_msg, "timestamp": datetime.datetime.now().isoformat()})), 
+                    manager.loop
+                )
+
+@app.get("/api/logs")
+async def get_logs():
+    log_file = os.path.join(BASE_DIR, "data", "vault.log")
+    if not os.path.exists(log_file):
+        return {"logs": []}
+        
+    try:
+        with open(log_file, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            recent = lines[-200:]
+            
+        out = []
+        for line in recent:
+            clean = line.strip().replace("\033[1;36m", "").replace("\033[0m", "")
+            if clean:
+                out.append({"message": clean, "timestamp": datetime.datetime.now().isoformat()})
+        return {"logs": out}
+    except Exception as e:
+        return {"logs": []}
 
 @app.get("/api/live-prices")
 async def get_live_prices():
