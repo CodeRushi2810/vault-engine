@@ -329,11 +329,20 @@ class StateMachineEngine:
                 invest_amount = total_portfolio_value * allocation_pct
                 
                 invest_amount = max(invest_amount, 10000)
-                invest_amount = min(invest_amount, self.balance)
                 
+                # Cap at available balance to prevent negative cash
+                invest_amount = min(invest_amount, self.balance)
+
+                self.latest_signals[stock]['action'] = 'BUY'
+                self.latest_signals[stock]['price'] = price
+                self.latest_signals[stock]['time'] = timestamp.strftime('%H:%M:%S')
+
                 if invest_amount >= price:
                     shares = int(invest_amount // price)
                     if shares > 0:
+                        self.latest_signals[stock]['executed'] = True
+                        self.latest_signals[stock]['quantity'] = shares
+                        
                         cost = shares * price # friction removed
                         self.balance -= cost
                         self.open_positions.append(Position(stock, best_signal['strategy'], timestamp, price, shares, cost, best_signal['tsl_pct']))
@@ -341,6 +350,12 @@ class StateMachineEngine:
                         
                         msg = f"🟢 Bought {shares} {stock} at Rs {price:,.2f}"
                         send_discord_message(msg)
+                    else:
+                        self.latest_signals[stock]['executed'] = False
+                        self.latest_signals[stock]['reason'] = 'Zero Qty'
+                else:
+                    self.latest_signals[stock]['executed'] = False
+                    self.latest_signals[stock]['reason'] = 'No Funds'
 
 
 def run_state_machine():

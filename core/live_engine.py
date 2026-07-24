@@ -111,13 +111,13 @@ class LiveExecutionEngine:
 
     def fetch_live_candles(self, start_dt, end_dt):
         candles_dict = {}
-        # Execute all 26 stocks concurrently, but stagger them by 0.11s each.
-        # 0.11s stagger = exactly 9 requests per second (safely below the 10/s limit).
-        # Total execution time: 26 * 0.11 = 2.86 seconds + 1s network latency = 3.8 seconds!
+        # Execute all 26 stocks concurrently, but stagger them by 0.35s each.
+        # 0.35s stagger = roughly 3 requests per second, completely avoiding rate limits.
+        # Total execution time: 26 * 0.35 = 9.1 seconds
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.stocks)) as executor:
             future_to_stock = {}
             for i, stock in enumerate(self.stocks):
-                future = executor.submit(self._fetch_single_live_candle, stock, start_dt, end_dt, i * 0.11)
+                future = executor.submit(self._fetch_single_live_candle, stock, start_dt, end_dt, i * 0.2)
                 future_to_stock[future] = stock
                 
             for future in concurrent.futures.as_completed(future_to_stock):
@@ -130,24 +130,24 @@ class LiveExecutionEngine:
         now = datetime.datetime.now()
         log_and_broadcast(f"Step 1: Successfully fetched live ticks for {len(candles_dict)} stocks.")
         update_agent_status("ExecutionEngine", f"Successfully fetched live ticks for {len(candles_dict)} stocks.", is_active=True)
-        await asyncio.sleep(0.5) # Slight stagger for UI animation
         
         update_agent_status("SignalProcessor", f"Scanning {len(candles_dict)} assets for mean-reversion signals...", is_active=True)
         update_agent_status("RiskManager", "Assessing pre-trade risk constraints...", is_active=True)
         
         log_and_broadcast("Step 2: Feeding data into AETHER Core...")
         update_agent_status("ExecutionEngine", "Feeding data into AETHER Core...", is_active=True)
-        await asyncio.sleep(0.5) # Slight stagger for UI animation
         
-        log_and_broadcast("Step 3: Evaluating ML models and dispatching Discord alerts...")
-        update_agent_status("ExecutionEngine", "Evaluating ML models and dispatching Discord alerts...", is_active=True)
+        log_and_broadcast("Step 3: ML model evaluating stocks...")
+        update_agent_status("ExecutionEngine", "ML model evaluating stocks...", is_active=True)
         
         initial_open = len(self.engine.open_positions)
         initial_closed = len(self.engine.completed_trades)
         
-        for stock, c in candles_dict.items():
+        import concurrent.futures
+        
+        def prepare_stock_features(stock, c, candle_ts):
             csv_path = os.path.join(BASE_DIR, "data", stock, "15m_candles.csv")
-            if not os.path.exists(csv_path): continue
+            if not os.path.exists(csv_path): return None
             try:
                 df = pd.read_csv(csv_path)
                 df['Timestamp'] = pd.to_datetime(df['Timestamp'])
@@ -162,24 +162,37 @@ class LiveExecutionEngine:
                 df = pd.concat([df, new_df], ignore_index=True)
                 
                 # Compute features on the merged live history
+                from backtesting.features import compute_features
                 df = compute_features(df)
                 df['Stock'] = stock
-                live_row = df.iloc[-1]
-                
-                # Pass into the ML engine with ACTUAL clock time, not candle start time
-                actual_now_str = now.strftime('%Y-%m-%d %H:%M:%S')
-                self.engine.process_candle(pd.to_datetime(actual_now_str), live_row, self.strategies)
-                
+                return stock, df.iloc[-1]
             except Exception as e:
                 logger.error(f"Error processing {stock} live tick: {e}")
+                return None
+
+        # Concurrently compute features to prevent 10s delay
+        processed_rows = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.stocks)) as executor:
+            future_to_stock = {executor.submit(prepare_stock_features, stock, c, candle_ts): stock for stock, c in candles_dict.items()}
+            for future in concurrent.futures.as_completed(future_to_stock):
+                res = future.result()
+                if res:
+                    stock, live_row = res
+                    processed_rows[stock] = live_row
+        
+        # Sequentially pass to engine to ensure thread-safety for internal ledger
+        actual_now_str = now.strftime('%Y-%m-%d %H:%M:%S')
+        actual_dt = pd.to_datetime(actual_now_str)
+        for stock in self.stocks:
+            if stock in processed_rows:
+                self.engine.process_candle(actual_dt, processed_rows[stock], self.strategies)
+                
                 
         trades_executed = (len(self.engine.open_positions) != initial_open) or (len(self.engine.completed_trades) != initial_closed)
                 
         if not trades_executed:
             log_and_broadcast("No trades executed this cycle. Bypassing Step 4 & Step 5...")
-            update_agent_status("ExecutionEngine", "No trades executed this cycle.", is_active=True)
-            await asyncio.sleep(1.0)
-            update_agent_status("ExecutionEngine", "Awaiting timeframe close...", is_active=True)
+            update_agent_status("ExecutionEngine", "No trades executed this cycle. Awaiting timeframe close...", is_active=True)
             update_agent_status("SignalProcessor", "Resting...", is_active=False)
             update_agent_status("RiskManager", "Risk levels optimal. Maximum drawdown within bounds.", is_active=False)
             self._save_latest_signals()
@@ -188,7 +201,6 @@ class LiveExecutionEngine:
         # Save state and update dashboard with true clock time
         log_and_broadcast("Step 4: Synching AETHER states to internal memory...")
         update_agent_status("ExecutionEngine", "Synching AETHER states to internal memory...", is_active=True)
-        await asyncio.sleep(0.5)
         
         actual_now_str = now.strftime('%Y-%m-%d %H:%M:%S')
         last_prices = {stock: c['close'] for stock, c in candles_dict.items()}
@@ -196,7 +208,6 @@ class LiveExecutionEngine:
         
         log_and_broadcast("Step 5: Compiling real-time Dashboard payload...")
         update_agent_status("ExecutionEngine", "Compiling real-time Dashboard payload...", is_active=True)
-        await asyncio.sleep(0.5)
         try:
             generate_report()
             from core.data_utils import push_dashboard_to_mongo
@@ -211,9 +222,17 @@ class LiveExecutionEngine:
 
     def _save_latest_signals(self):
         try:
+            import numpy as np
+            class NpEncoder(json.JSONEncoder):
+                def default(self, obj):
+                    if isinstance(obj, np.integer): return int(obj)
+                    if isinstance(obj, np.floating): return float(obj)
+                    if isinstance(obj, np.ndarray): return obj.tolist()
+                    return super(NpEncoder, self).default(obj)
+                    
             signals_file = os.path.join(BASE_DIR, "data", "latest_signals.json")
             with open(signals_file, "w") as f:
-                json.dump(self.engine.latest_signals, f)
+                json.dump(self.engine.latest_signals, f, cls=NpEncoder)
         except Exception as e:
             logger.error(f"Failed to save latest signals: {e}")
 

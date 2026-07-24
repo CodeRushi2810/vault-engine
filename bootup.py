@@ -62,16 +62,27 @@ def generate_previous_close():
                         nifty = groww.get_quote("NIFTY", "NSE", "CASH")
                         sensex = groww.get_quote("SENSEX", "BSE", "CASH")
                         
+                        def parse_index(idx_q):
+                            if not idx_q: return None, None, None
+                            ltp = idx_q.get("last_price")
+                            c = idx_q.get("ohlc", {}).get("close")
+                            if ltp is not None and c is not None:
+                                return ltp, ltp - c, ((ltp - c) / c * 100) if c else 0
+                            return ltp, None, None
+
+                        n_ltp, n_dc, n_dcp = parse_index(nifty)
+                        s_ltp, s_dc, s_dcp = parse_index(sensex)
+
                         data["INDICES"] = {
                             "NIFTY": {
-                                "ltp": nifty.get("last_price") if nifty else None,
-                                "dayChange": nifty.get("day_change") if nifty else None,
-                                "dayChangePerc": nifty.get("day_change_perc") if nifty else None
+                                "ltp": n_ltp,
+                                "dayChange": n_dc,
+                                "dayChangePerc": n_dcp
                             },
                             "SENSEX": {
-                                "ltp": sensex.get("last_price") if sensex else None,
-                                "dayChange": sensex.get("day_change") if sensex else None,
-                                "dayChangePerc": sensex.get("day_change_perc") if sensex else None
+                                "ltp": s_ltp,
+                                "dayChange": s_dc,
+                                "dayChangePerc": s_dcp
                             }
                         }
             except Exception as e:

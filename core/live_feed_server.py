@@ -107,11 +107,37 @@ def on_data_received(meta):
     nexus_tick_count += 1
     
     # Map tokens to symbols server-side so the frontend doesn't need tokens
-    data = {'NSE': {'CASH': {}}}
+    data = {'NSE': {'CASH': {}}, 'INDICES': {}}
     if 'NSE' in raw_data and 'CASH' in raw_data['NSE']:
         for token, val in raw_data['NSE']['CASH'].items():
             symbol = TOKEN_TO_STOCK.get(token, token)
             data['NSE']['CASH'][symbol] = val
+
+    try:
+        idx_raw = feed.get_index_value()
+        if idx_raw:
+            if 'NSE' in idx_raw and 'CASH' in idx_raw['NSE']:
+                nifty_data = idx_raw['NSE']['CASH'].get('NIFTY')
+                if nifty_data and nifty_data.get('value'):
+                    ltp = nifty_data.get('value')
+                    c = initial_prices.get('NIFTY', {}).get('close', ltp)
+                    data['INDICES']['NIFTY'] = {
+                        "ltp": ltp,
+                        "dayChange": ltp - c,
+                        "dayChangePerc": ((ltp - c) / c * 100) if c else 0
+                    }
+            if 'BSE' in idx_raw and 'CASH' in idx_raw['BSE']:
+                sensex_data = idx_raw['BSE']['CASH'].get('1')
+                if sensex_data and sensex_data.get('value'):
+                    ltp = sensex_data.get('value')
+                    c = initial_prices.get('SENSEX', {}).get('close', ltp)
+                    data['INDICES']['SENSEX'] = {
+                        "ltp": ltp,
+                        "dayChange": ltp - c,
+                        "dayChangePerc": ((ltp - c) / c * 100) if c else 0
+                    }
+    except Exception as e:
+        pass
             
     # Broadcast to all connected clients
     if manager.loop and manager.loop.is_running():
@@ -205,34 +231,7 @@ def poll_agents():
             logger.error("Error polling agents:", e)
         time.sleep(1)
 
-def poll_indices(groww):
-    """
-    Dedicated background thread to poll NIFTY and SENSEX via REST.
-    Bypasses WebSocket index issues where 'p' defaults to 0.
-    """
-    while True:
-        try:
-            from core.market_utils import get_market_status
-            status = get_market_status()
-            if status in ["OPEN", "PRE_MARKET"]:
-                payload = {"INDICES": {}}
-                for idx_symbol, idx_exch in [("NIFTY", "NSE"), ("SENSEX", "BSE")]:
-                    try:
-                        q = groww.get_quote(idx_symbol, idx_exch, "CASH")
-                        if q and 'last_price' in q:
-                            c = q.get('ohlc', {}).get('close', q['last_price'])
-                            payload["INDICES"][idx_symbol] = {
-                                "ltp": q['last_price'],
-                                "dayChange": q['last_price'] - c,
-                                "dayChangePerc": ((q['last_price'] - c) / c * 100) if c else 0
-                            }
-                    except:
-                        pass
-                if payload["INDICES"] and manager.loop and manager.loop.is_running():
-                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(payload)), manager.loop)
-            time.sleep(3)
-        except Exception as e:
-            time.sleep(3)
+
 
 def pre_market_poller(groww, tokens):
     """
@@ -292,24 +291,23 @@ def start_groww_feed():
         pre_market_thread = threading.Thread(target=pre_market_poller, args=(groww, tokens), daemon=True)
         pre_market_thread.start()
 
-        index_poller_thread = threading.Thread(target=poll_indices, args=(groww,), daemon=True)
-        index_poller_thread.start()
-        
         status = get_market_status()
         if status not in ["PRE_MARKET", "OPEN", "POST_MARKET"]:
             logger.info(f"Market is {status}. Bypassing Live Feed subscriptions.")
             return
             
         global initial_prices
-        logger.info("Fetching initial quotes for all stocks...")
-        for symbol, token in tokens.items():
+        logger.info("Fetching initial quotes for all stocks and indices...")
+        for symbol, token in list(tokens.items()) + [("NIFTY", "NIFTY"), ("SENSEX", "1")]:
             max_retries = 3
             retry_delay = 2
+            exch = "BSE" if symbol == "SENSEX" else "NSE"
             for attempt in range(max_retries):
                 try:
-                    q = groww.get_quote(symbol, "NSE", "CASH")
+                    q = groww.get_quote(symbol, exch, "CASH")
                     if q and 'last_price' in q:
-                        initial_prices[symbol] = {"ltp": q['last_price']}
+                        close_p = q.get('ohlc', {}).get('close', q['last_price'])
+                        initial_prices[symbol] = {"ltp": q['last_price'], "close": close_p}
                     
                     time.sleep(0.5)
                     break
@@ -345,6 +343,13 @@ def start_groww_feed():
                     
                 logger.info("Subscribing to LTP for stocks...")
                 feed.subscribe_ltp(instruments_list, on_data_received=on_data_received)
+                
+                logger.info("Subscribing to Index values for NIFTY and SENSEX...")
+                index_list = [
+                    {"exchange": "NSE", "segment": "CASH", "exchange_token": "NIFTY"},
+                    {"exchange": "BSE", "segment": "CASH", "exchange_token": "1"}
+                ]
+                feed.subscribe_index_value(index_list, on_data_received=on_data_received)
                 
                 logger.info("Consuming feed...")
                 feed.consume()

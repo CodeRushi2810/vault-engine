@@ -23,6 +23,8 @@ def send_discord_message(message):
     }
     
     try:
+        from core.agent_state import append_agent_status, update_agent_status
+        append_agent_status("DiscordBot", f"Transmitted: {message}")
         response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
         # Discord returns 204 No Content on success
         if response.status_code in [200, 204]:

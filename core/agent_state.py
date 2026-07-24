@@ -47,6 +47,14 @@ DEFAULT_AGENTS = {
         "status": "System synchronized.",
         "is_active": False,
         "lastActive": ""
+    },
+    "DiscordBot": {
+        "name": "HERMES",
+        "role": "Discord Bot",
+        "description": "Handles external communications and alerts.",
+        "status": "Awaiting events...",
+        "is_active": False,
+        "lastActive": ""
     }
 }
 
@@ -82,6 +90,28 @@ def update_agent_status(agent_id, status, is_active=False):
             
             state[agent_id]["status"] = status
             state[agent_id]["is_active"] = is_active
+            state[agent_id]["lastActive"] = datetime.datetime.now().strftime('%H:%M:%S')
+            
+            _write_state(state)
+            break
+        except Exception:
+            time.sleep(0.05)
+
+def append_agent_status(agent_id, new_line, max_lines=10):
+    for _ in range(3):
+        try:
+            state = _read_state()
+            if agent_id not in state:
+                state[agent_id] = DEFAULT_AGENTS.get(agent_id, {}).copy()
+            
+            current_status = state[agent_id].get("status", "")
+            lines = current_status.split('\n')
+            if "Awaiting" in lines[0] or "events..." in lines[0]:
+                lines = []
+            
+            lines.insert(0, f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {new_line}")
+            state[agent_id]["status"] = '\n'.join(lines[:max_lines])
+            state[agent_id]["is_active"] = True
             state[agent_id]["lastActive"] = datetime.datetime.now().strftime('%H:%M:%S')
             
             _write_state(state)
