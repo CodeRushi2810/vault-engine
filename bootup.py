@@ -172,6 +172,9 @@ def main():
     logger.info("Starting background Discord listener (core/discord_listener.py)...")
     discord_process = start_and_wait(["python", "-m", "core.discord_listener"], ["Synced", "Logged in as"])
     
+    logger.info("Starting background Hermes Voice listener (core/hermes_ear.py)...")
+    hermes_process = subprocess.Popen(["python", "-m", "core.hermes_ear"])
+    
     market_state = get_market_status()
     
     try:
@@ -234,6 +237,8 @@ def main():
             engine_process.terminate()
         if discord_process and discord_process.poll() is None:
             discord_process.terminate()
+        if 'hermes_process' in locals() and hermes_process and hermes_process.poll() is None:
+            hermes_process.terminate()
         logger.info("Cleanup complete. Exiting.")
 
 if __name__ == "__main__":

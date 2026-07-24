@@ -372,4 +372,7 @@ class LiveExecutionEngine:
 
 if __name__ == "__main__":
     engine = LiveExecutionEngine()
-    asyncio.run(engine.run())
+    try:
+        asyncio.run(engine.run())
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Engine shutting down gracefully...")

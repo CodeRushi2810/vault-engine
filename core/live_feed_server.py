@@ -11,6 +11,9 @@ from growwapi import GrowwAPI, GrowwFeed
 from dotenv import load_dotenv
 import time
 import datetime
+import win32com.client
+import pythoncom
+import re
 
 from core.system_logger import setup_logger
 from core.config import STOCK_TOKENS as tokens, TOKEN_TO_STOCK
@@ -18,6 +21,34 @@ from core.health_check import get_system_health
 from core.market_utils import get_market_status
 from core.agent_state import get_all_agent_states, update_agent_status
 logger = setup_logger("live_feed")
+
+def format_indian_number(val: float) -> str:
+    """Formats a number into spoken Indian phrasing (Crores, Lakhs, Thousands) for TTS."""
+    val = round(abs(val))
+    if val == 0:
+        return "0"
+        
+    parts = []
+    
+    crores = val // 10000000
+    if crores > 0:
+        parts.append(f"{crores} crore")
+        val %= 10000000
+        
+    lakhs = val // 100000
+    if lakhs > 0:
+        parts.append(f"{lakhs} lakh")
+        val %= 100000
+        
+    thousands = val // 1000
+    if thousands > 0:
+        parts.append(f"{thousands} thousand")
+        val %= 1000
+        
+    if val > 0:
+        parts.append(str(val))
+        
+    return " ".join(parts)
 
 # Suppress growwapi logs to prevent raw 'Error:' spam
 import logging
@@ -55,6 +86,48 @@ async def get_dashboard_data():
             return JSONResponse(content=json.load(f))
     return JSONResponse(content={"trades": []})
 
+
+@app.get("/api/live_state")
+async def get_live_state():
+    """Returns the current static dashboard data merged with live LTPs."""
+    json_path = os.path.join(BASE_DIR, "data", "dashboard_data.json")
+    state = {"portfolio": {}, "prices": {}}
+    
+    # Get live prices from the active feed
+    if feed:
+        raw_data = feed.get_ltp()
+        if 'NSE' in raw_data and 'CASH' in raw_data['NSE']:
+            for token, val in raw_data['NSE']['CASH'].items():
+                symbol = TOKEN_TO_STOCK.get(token, token)
+                state["prices"][symbol] = val
+                
+    # Calculate portfolio values
+    total_val = 0
+    total_pnl = 0
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r') as f:
+                dash_data = json.load(f)
+                for t in dash_data.get("trades", []):
+                    if t.get("Status") == "OPEN":
+                        sym = t.get("Stock")
+                        shares = t.get("Shares", 0)
+                        cost = t.get("Cost_Basis", 0)
+                        live_p = state["prices"].get(sym, t.get("Entry_Price", 0))
+                        curr_val = shares * live_p
+                        total_val += curr_val
+                        total_pnl += (curr_val - cost)
+        except Exception:
+            pass
+            
+    state["portfolio"] = {
+        "portfolio": {
+            "total_current_value": total_val,
+            "total_pnl": total_pnl
+        }
+    }
+                
+    return JSONResponse(content=state)
 
 @app.get("/api/notifications")
 async def get_notifications():
@@ -475,6 +548,68 @@ async def test_notification(req: NotificationTestRequest):
               
     success = send_discord_message(msg)
     return {"success": success, "message": msg}
+
+class HermesBridgeMessage(BaseModel):
+    type: str
+    transcript: str = None
+
+class HermesCommand(BaseModel):
+    command: str
+
+# TTS is now entirely handled by hermes_ear.py
+
+@app.post("/api/hermes/bridge")
+async def hermes_bridge(req: HermesBridgeMessage):
+    await manager.broadcast(json.dumps({
+        "type": req.type,
+        "transcript": req.transcript
+    }))
+    return {"success": True}
+
+@app.post("/api/hermes/command")
+async def hermes_command(req: HermesCommand):
+    cmd = req.command.lower()
+    response_text = ""
+    
+    try:
+        from core.nlp_sitemap import HERMES_SITEMAP
+        
+        # Iterate over pages and actions in the sitemap
+        for page, actions in HERMES_SITEMAP.items():
+            found_match = False
+            for action in actions:
+                if action["match"](cmd):
+                    # Complex data requests have a dedicated handler
+                    if "handler" in action:
+                        response_text, ui_actions = action["handler"](cmd, BASE_DIR, initial_prices)
+                        for ui_action in ui_actions:
+                            delay = ui_action.pop("delay", 0)
+                            if delay:
+                                await asyncio.sleep(delay)
+                            await manager.broadcast(json.dumps(ui_action))
+                    # Simple UI or text requests
+                    else:
+                        response_text = action["response"](cmd)
+                        for ui_action in action.get("actions", []):
+                            # Copy the dict so we can safely mutate/pop
+                            action_copy = dict(ui_action)
+                            delay = action_copy.pop("delay", 0)
+                            if delay:
+                                await asyncio.sleep(delay)
+                            await manager.broadcast(json.dumps(action_copy))
+                    
+                    found_match = True
+                    break
+            
+            # If an action matched in any category, stop searching
+            if found_match:
+                break
+                
+                    
+    except Exception as e:
+        logger.error(f"Hermes Error: {e}")
+        
+    return {"response": response_text}
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "system_config.json")
 
