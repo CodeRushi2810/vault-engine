@@ -146,6 +146,17 @@ async def post_notifications(request: Request):
         f.write(content)
     return JSONResponse(content={"status": "success"})
 
+@app.delete("/api/hermes_history")
+async def clear_hermes_history():
+    history_path = os.path.join(BASE_DIR, "data", "hermes_chat_history.json")
+    if os.path.exists(history_path):
+        try:
+            os.remove(history_path)
+            return JSONResponse(content={"status": "success"})
+        except Exception as e:
+            return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
+    return JSONResponse(content={"status": "success"})
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections = []
@@ -474,7 +485,16 @@ async def websocket_endpoint(websocket: WebSocket):
 
 from pydantic import BaseModel
 from core.discord_bot import send_discord_message
+from google import genai
+from google.genai import types
+import os
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+except Exception as e:
+    genai_client = None
 class NotificationTestRequest(BaseModel):
     trade_type: str
     stock: str
@@ -566,48 +586,30 @@ async def hermes_bridge(req: HermesBridgeMessage):
     }))
     return {"success": True}
 
+from core.voice_agent import process_hermes_command
+
 @app.post("/api/hermes/command")
 async def hermes_command(req: HermesCommand):
     cmd = req.command.lower()
     response_text = ""
-    
     try:
-        from core.nlp_sitemap import HERMES_SITEMAP
-        
-        # Iterate over pages and actions in the sitemap
-        for page, actions in HERMES_SITEMAP.items():
-            found_match = False
-            for action in actions:
-                if action["match"](cmd):
-                    # Complex data requests have a dedicated handler
-                    if "handler" in action:
-                        response_text, ui_actions = action["handler"](cmd, BASE_DIR, initial_prices)
-                        for ui_action in ui_actions:
-                            delay = ui_action.pop("delay", 0)
-                            if delay:
-                                await asyncio.sleep(delay)
-                            await manager.broadcast(json.dumps(ui_action))
-                    # Simple UI or text requests
-                    else:
-                        response_text = action["response"](cmd)
-                        for ui_action in action.get("actions", []):
-                            # Copy the dict so we can safely mutate/pop
-                            action_copy = dict(ui_action)
-                            delay = action_copy.pop("delay", 0)
-                            if delay:
-                                await asyncio.sleep(delay)
-                            await manager.broadcast(json.dumps(action_copy))
-                    
-                    found_match = True
-                    break
-            
-            # If an action matched in any category, stop searching
-            if found_match:
-                break
+        dash_path = os.path.join(BASE_DIR, "data", "dashboard_data.json")
+        dash_data = {}
+        if os.path.exists(dash_path):
+            with open(dash_path, "r") as f:
+                dash_data = json.load(f)
                 
-                    
+        response_text, ui_actions = await process_hermes_command(cmd, dash_data, BASE_DIR, genai_client)
+        
+        for action in ui_actions:
+            delay = action.get("delay", 0)
+            if delay:
+                await asyncio.sleep(delay)
+            await manager.broadcast(json.dumps(action))
+            
     except Exception as e:
         logger.error(f"Hermes Error: {e}")
+        response_text = "Sorry, I encountered an error while processing that."
         
     return {"response": response_text}
 

@@ -8,6 +8,7 @@ import pythoncom
 import random
 import os
 import json
+from datetime import datetime
 
 from core.system_logger import setup_logger
 
@@ -32,12 +33,17 @@ def speak(text):
         pythoncom.CoInitialize()
         speaker = win32com.client.Dispatch("SAPI.SpVoice")
         
-        # Select David (index 0 / Microsoft David)
+        # Priority list of voices: Indian Male (Ravi), Indian Female (Heera), Default (David)
         voices = speaker.GetVoices()
-        for i in range(voices.Count):
-            if "David" in voices.Item(i).GetDescription():
-                speaker.Voice = voices.Item(i)
-                break
+        preferred_voices = ["Ravi", "Heera", "David"]
+        selected = False
+        for pref in preferred_voices:
+            if selected: break
+            for i in range(voices.Count):
+                if pref in voices.Item(i).GetDescription():
+                    speaker.Voice = voices.Item(i)
+                    selected = True
+                    break
         
         # Wrap the text in the XML pitch modifier you loved!
         xml_text = f"<pitch absmiddle='-10'>{text}</pitch>"
@@ -59,7 +65,7 @@ def send_event(event_type, transcript=None):
         payload = {"type": event_type}
         if transcript:
             payload["transcript"] = transcript
-        requests.post(API_BRIDGE_URL, json=payload, timeout=1)
+        requests.post(API_BRIDGE_URL, json=payload, timeout=3)
     except Exception as e:
         logger.error(f"Failed to send event: {e}")
 
@@ -91,21 +97,18 @@ def listen_for_wake_word():
                         
                         # 2. Process command via API
                         try:
-                            resp = requests.post("http://127.0.0.1:8000/api/hermes/command", json={"command": transcript}, timeout=3)
+                            resp = requests.post("http://127.0.0.1:8000/api/hermes/command", json={"command": transcript}, timeout=15)
                             if resp.status_code == 200:
                                 data = resp.json()
-                                reply_text = data.get("response", "")
-                                if reply_text:
-                                    logger.info(f"Agent Response: {reply_text}")
-                                    speak(reply_text)
-                                else:
-                                    send_event("HERMES_SLEEP")
-                            else:
-                                send_event("HERMES_SLEEP")
+                                response_text = data.get("response", "Done.")
+                                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] [hermes_ear] - Agent Response: {response_text}")
+                                speak(response_text)
+                        except requests.exceptions.Timeout:
+                            logger.error("Hermes engine timed out waiting for LLM response.")
+                            speak("Sorry, my brain is taking a little too long to respond.")
                         except Exception as e:
                             logger.error(f"Failed to process command: {e}")
-                            send_event("HERMES_SLEEP")
-                            
+                            speak("Sorry, I ran into a system error.")
                 except sr.UnknownValueError:
                     pass
                 except sr.RequestError as e:
