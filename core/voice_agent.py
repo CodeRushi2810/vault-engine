@@ -92,6 +92,12 @@ async def process_hermes_command(cmd: str, dash_data: dict, BASE_DIR: str, genai
             if isinstance(p, (int, float)):
                 market_data[stock] = math.ceil(p)
                 
+        from core.market_utils import get_market_status, get_holiday_name
+        import datetime
+        now = datetime.datetime.now()
+        market_status = get_market_status(now)
+        holiday = get_holiday_name(now)
+        
         context_dict = {
             "metrics": {
                 "realized_profit": math.ceil(all_time_realized),
@@ -99,6 +105,10 @@ async def process_hermes_command(cmd: str, dash_data: dict, BASE_DIR: str, genai
                 "invested_amount": math.ceil(total_invested),
                 "available_cash": math.ceil(1000000 + all_time_realized - total_invested),
                 "one_day_return": math.ceil(total_1d_pnl)
+            },
+            "market_info": {
+                "status": market_status,
+                "holiday_reason": holiday if holiday else "N/A"
             },
             "open_trades": open_summary,
             "closed_trades_pnl": closed_summary,
