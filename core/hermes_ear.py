@@ -6,8 +6,19 @@ import requests
 import win32com.client
 import pythoncom
 import random
+import os
+import json
 
 from core.system_logger import setup_logger
+
+def is_hermes_enabled():
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "system_config.json")
+    try:
+        with open(config_path, "r") as f:
+            cfg = json.load(f)
+            return cfg.get("engine", {}).get("features", {}).get("voice_orb", True)
+    except Exception:
+        return True
 logger = setup_logger("hermes_ear")
 
 API_BRIDGE_URL = "http://127.0.0.1:8000/api/hermes/bridge"
@@ -64,8 +75,12 @@ def listen_for_wake_word():
         logger.info("\033[92mSystem Online. Listening for 'Hey Hermes'...\033[0m")
         
         while True:
+            if not is_hermes_enabled():
+                time.sleep(2)
+                continue
+                
             try:
-                audio = recognizer.listen(source, phrase_time_limit=10)
+                audio = recognizer.listen(source, timeout=2, phrase_time_limit=10)
                 try:
                     transcript = recognizer.recognize_google(audio).lower()
                     if transcript:
@@ -95,6 +110,8 @@ def listen_for_wake_word():
                     pass
                 except sr.RequestError as e:
                     logger.error(f"Could not request results; {e}")
+            except sr.WaitTimeoutError:
+                continue
             except Exception as e:
                 logger.error(f"Error in ear loop: {e}")
                 time.sleep(1)

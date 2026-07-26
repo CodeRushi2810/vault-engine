@@ -1,5 +1,8 @@
 import os
 import requests
+import threading
+import re
+import json
 from dotenv import load_dotenv
 from core.system_logger import setup_logger
 
@@ -17,6 +20,27 @@ def send_discord_message(message):
     # We strip out basic HTML bold tags and replace them with Markdown **
     message = message.replace('<b>', '**').replace('</b>', '**')
     message = message.replace('<i>', '*').replace('</i>', '*')
+
+    # --- Hermes TTS Callout ---
+    try:
+        from core.hermes_ear import speak
+        config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "system_config.json")
+        hermes_enabled = True
+        try:
+            with open(config_path, "r") as f:
+                hermes_enabled = json.load(f).get("engine", {}).get("features", {}).get("voice_orb", True)
+        except Exception:
+            pass
+            
+        if hermes_enabled:
+            tts_msg = re.sub(r'<[^>]+>', ' ', message)
+            tts_msg = re.sub(r'[*_#`~\[\]()]', '', tts_msg)
+            tts_msg = re.sub(r'[^\x00-\x7F]+', '', tts_msg).strip()
+            if tts_msg:
+                threading.Thread(target=speak, args=(tts_msg,), daemon=True).start()
+    except Exception as e:
+        logger.error(f"Failed to invoke Hermes for trade callout: {e}")
+    # --------------------------
 
     payload = {
         'content': message

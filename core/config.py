@@ -61,5 +61,5 @@ STOCK_ALIASES = {
     "SIEMENS": ["Siemens", "siemens"],
     "ABB": ["ABB India", "abb india", "abb"],
     "AEROFLEX": ["Aeroflex Industries", "aeroflex industries", "aeroflex"],
-    "ENRIN": ["Enviro Infra Engineers", "enviro infra", "enviro infra engineers", "enrin"],
+    "ENRIN": ["Siemens Energy India", "Siemens Energy", "siemens energy", "enrin"],
 }

@@ -18,26 +18,10 @@ for handler in discord_logger.handlers[:]:
 discord_logger.handlers = logger.handlers
 discord_logger.propagate = False
 
-STOCK_NAMES = {
-  'ANANTRAJ': 'Anant Raj',
-  'BBOX': 'Black Box',
-  'CGPOWER': 'CG Power & Inds',
-  'EICHERMOT': 'Eicher Motors',
-  'HFCL': 'HFCL Ltd',
-  'JBMA': 'JBM Auto',
-  'MTARTECH': 'MTAR Technologies',
-  'NETWEB': 'Netweb Technologies',
-  'POWERINDIA': 'Hitachi Energy India',
-  'SCHNEIDER': 'Schneider Electric',
-  'WAAREEENER': 'Waaree Energies',
-  'INFY': 'Infosys',
-  'TRENT': 'Trent',
-  'SBIN': 'State Bank Of India',
-  'JUBLFOOD': 'Jubilant FoodWorks'
-}
+from core.config import STOCK_ALIASES
 
 def get_stock_name(symbol):
-    return STOCK_NAMES.get(symbol, symbol)
+    return STOCK_ALIASES.get(symbol, [symbol])[0]
 
 # Load environment variables
 load_dotenv()
