@@ -17,6 +17,7 @@ class UiAction(BaseModel):
 
 class HermesResponseModel(BaseModel):
     speech_text: str
+    chat_text: str | None = None
     ui_actions: list[UiAction]
 
 async def process_hermes_command(cmd: str, dash_data: dict, BASE_DIR: str, genai_client) -> tuple[str, list[dict]]:
@@ -164,11 +165,12 @@ Sorting Actions (For direction, use "asc" or "desc"):
 - Sort Open Trades table (Trades tab): {{"type": "HERMES_SORT_TABLE", "table": "open", "key": "Stock" | "Entry_Time" | "Entry_Price" | "PnL_Percent" | "Cost_Basis", "direction": "asc" | "desc"}}
 - Sort Closed Trades table (Trades tab): {{"type": "HERMES_SORT_TABLE", "table": "closed", "key": "Stock" | "Entry_Time" | "Exit_Time" | "Entry_Price" | "Shares" | "Cost_Basis" | "PnL_Percent", "direction": "asc" | "desc"}}
 
-Provide a short, snappy, highly charismatic, and natural-sounding response to speak aloud. You are a sleek, high-end, witty AI assistant (think JARVIS or a sharp Wall Street veteran). Be charming, slightly cheeky, highly engaging, and never boring or robotic. Instead of saying "Opening your dashboard now," say something stylish like "Right away, boss. Let's pull up the numbers." Give solid advice but make it fun and energetic! Keep it brief and conversational.
-DO NOT use markdown or emojis. 
+Provide your response in TWO formats for the system to process:
+1. `speech_text`: A short, snappy, charismatic response to speak aloud. DO NOT use markdown or emojis. ALWAYS reply in English. CRITICAL: The TTS engine cannot read numbers with Indian comma placements (like 11,95,415) and will read the literal word "comma". To fix this, ALWAYS spell out large numbers using Indian terms (e.g., "11 Lakhs 95 Thousand 415" or "1 Crore 20 Lakhs"). Never use commas in numbers.
+2. `chat_text`: A rich-text formatted response for the visual chat window. USE Github-flavored Markdown (bolding, lists, etc) to make it visually appealing. You CAN and SHOULD use standard commas for number formatting here (e.g. ₹11,95,415), and feel free to use emojis to make the UI look premium!
+
+You are a sleek, high-end, witty AI assistant (think JARVIS or a sharp Wall Street veteran). Be charming, slightly cheeky, highly engaging, and never boring or robotic. Instead of saying "Opening your dashboard now," say something stylish like "Right away, boss. Let's pull up the numbers." Give solid advice but make it fun and energetic! Keep it brief and conversational.
 CRITICAL: Do not use repetitive transition phrases like "However", "That being said", or "Overall". Make your dialogue flow like a charismatic movie character.
-CRITICAL: ALWAYS reply in English. Your voice synthesizer (Microsoft David) only speaks English natively. Even if the user speaks to you in Hindi or another language, you MUST respond in English.
-CRITICAL: The TTS engine cannot read numbers with Indian comma placements (like 11,95,415) and will read the literal word "comma". To fix this, ALWAYS spell out large numbers using Indian terms (e.g., "11 Lakhs 95 Thousand 415" or "1 Crore 20 Lakhs"). Never use commas in numbers.
 """
         if genai_client:
             res = genai_client.models.generate_content(
@@ -181,6 +183,9 @@ CRITICAL: The TTS engine cannot read numbers with Indian comma placements (like 
             )
             data = json.loads(res.text)
             response_text = data.get("speech_text", "")
+            chat_text = data.get("chat_text", response_text)
+            if not chat_text:
+                chat_text = response_text
             
             for action in data.get("ui_actions", []):
                 delay = action.pop("delay", 0)
@@ -192,15 +197,17 @@ CRITICAL: The TTS engine cannot read numbers with Indian comma placements (like 
                 
             # Append new messages to history and save
             history.append({"role": "User", "text": cmd, "timestamp": current_time})
-            history.append({"role": "Hermes", "text": response_text, "timestamp": time.time()})
+            history.append({"role": "Hermes", "text": chat_text, "timestamp": time.time()})
             with open(history_path, "w") as fw:
                 json.dump(history, fw, indent=2)
         else:
             response_text = "Sorry, Gemini API is not configured."
+            chat_text = response_text
             
     except Exception as e:
         import traceback
         traceback.print_exc()
         response_text = "Sorry, I encountered an error while processing that."
+        chat_text = response_text
         
-    return response_text, ui_actions_to_send
+    return response_text, chat_text, ui_actions_to_send

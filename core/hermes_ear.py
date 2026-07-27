@@ -24,10 +24,12 @@ logger = setup_logger("hermes_ear")
 
 API_BRIDGE_URL = "http://127.0.0.1:8000/api/hermes/bridge"
 
-def speak(text):
+def speak(text, chat_text=None):
+    if chat_text is None:
+        chat_text = text
     try:
         # 1. Send Speaking Event to Dashboard
-        send_event("HERMES_SPEAKING", text)
+        send_event("HERMES_SPEAKING", chat_text)
         
         # 2. Speak synchronously using Windows SAPI (Zero Delay!)
         pythoncom.CoInitialize()
@@ -78,7 +80,7 @@ def listen_for_wake_word():
     with sr.Microphone() as source:
         logger.info("\033[93mCalibrating microphone for ambient noise...\033[0m")
         recognizer.adjust_for_ambient_noise(source, duration=2)
-        logger.info("\033[92mSystem Online. Listening for 'Hey Hermes'...\033[0m")
+        logger.info("\033[92mVoice Assistant Online. Listening for your commands...\033[0m")
         
         while True:
             if not is_hermes_enabled():
@@ -101,8 +103,9 @@ def listen_for_wake_word():
                             if resp.status_code == 200:
                                 data = resp.json()
                                 response_text = data.get("response", "Done.")
+                                chat_text = data.get("chat_response", response_text)
                                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] [hermes_ear] - Agent Response: {response_text}")
-                                speak(response_text)
+                                speak(response_text, chat_text)
                         except requests.exceptions.Timeout:
                             logger.error("Hermes engine timed out waiting for LLM response.")
                             speak("Sorry, my brain is taking a little too long to respond.")

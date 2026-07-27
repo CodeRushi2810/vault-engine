@@ -9,7 +9,7 @@ from core.config import STOCKS as stocks
 from growwapi import GrowwAPI
 logger = setup_logger("data_utils")
 
-def get_previous_close_prices():
+def get_previous_close_prices(force_refresh=False):
     close_prices = {}
     now = datetime.datetime.now().date()
     today_str = now.strftime('%Y-%m-%d')
@@ -17,7 +17,7 @@ def get_previous_close_prices():
     cache_path = os.path.join(BASE_DIR, "data", "prev_close.json")
     
     # 1. Date-based Smart Caching
-    if os.path.exists(cache_path):
+    if not force_refresh and os.path.exists(cache_path):
         try:
             with open(cache_path, "r") as f:
                 cached_data = json.load(f)

@@ -18,12 +18,13 @@ from core.agent_state import update_agent_status
 
 logger = setup_logger("bootup")
 
-def generate_previous_close():
+def generate_previous_close(force_refresh=False):
     logger.info("Injecting previous close and offline prices into dashboard_data.json...")
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     
     try:
-        close_prices = get_previous_close_prices()
+        from core.data_utils import get_previous_close_prices
+        close_prices = get_previous_close_prices(force_refresh=force_refresh)
         json_path = os.path.join(BASE_DIR, "data", "dashboard_data.json")
         
         data = {"trades": []}
@@ -176,22 +177,34 @@ def main():
     hermes_process = subprocess.Popen(["python", "-m", "core.hermes_ear"])
     
     market_state = get_market_status()
+    import datetime
+    last_rollover_date = datetime.datetime.now().date()
     
     try:
         while True:
             current_state = get_market_status()
+            now = datetime.datetime.now()
+            
+            # 6:00 AM Rollover Logic (Executes once per trading day)
+            if now.hour >= 6 and now.hour < 15:
+                if last_rollover_date != now.date():
+                    if current_state == "CLOSED":
+                        logger.info("Clock passed 6:00 AM on a trading day. Rolling over baseline...")
+                        generate_previous_close()
+                    last_rollover_date = now.date()
             
             # Detect transition from OPEN to POST_MARKET
             if current_state == "POST_MARKET" and market_state == "OPEN":
                 logger.info("Market transitioned to POST_MARKET.")
-                logger.info("Fetching end-of-day 1D candles from Groww API...")
-                subprocess.run(["python", "-m", "core.fetch_data"])
                 
             # Detect transition from POST_MARKET to CLOSED
             elif current_state == "CLOSED" and market_state == "POST_MARKET":
                 logger.info("Market transitioned to CLOSED.")
-                logger.info("Fetching final official VWAP closing prices...")
-                generate_previous_close()
+                logger.info("Locking in final offline prices for the night...")
+                generate_previous_close(force_refresh=False)
+                
+                logger.info("Synchronizing final 15m historical candles for the day...")
+                subprocess.run(["python", "-m", "core.fetch_data"])
                 
                 # Restart feed server to refresh tokens and clear cache for the night
                 logger.info("Restarting live_feed_server.py for overnight Dashboard access...")
@@ -202,6 +215,7 @@ def main():
             # Detect transition from CLOSED to PRE_MARKET
             elif current_state == "PRE_MARKET" and market_state in ["CLOSED", "HOLIDAY", "WEEKEND"]:
                 logger.info("Market transitioned to PRE_MARKET.")
+                
                 # Restart feed server to get fresh morning token and warmup connections
                 logger.info("Restarting live_feed_server.py for morning warmup...")
                 feed_process.terminate()

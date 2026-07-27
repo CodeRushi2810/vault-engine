@@ -329,13 +329,19 @@ class StateMachineEngine:
                 invest_amount = total_portfolio_value * allocation_pct
                 
                 invest_amount = max(invest_amount, 10000)
-                
-                # Cap at available balance to prevent negative cash
-                invest_amount = min(invest_amount, self.balance)
 
                 self.latest_signals[stock]['action'] = 'BUY'
                 self.latest_signals[stock]['price'] = price
                 self.latest_signals[stock]['time'] = timestamp.strftime('%H:%M:%S')
+
+                # Strictly enforce 10k minimum trade rule
+                if self.balance < 10000:
+                    self.latest_signals[stock]['executed'] = False
+                    self.latest_signals[stock]['reason'] = 'Insufficient funds (< 10k)'
+                    return
+                
+                # Cap at available balance to prevent negative cash
+                invest_amount = min(invest_amount, self.balance)
 
                 if invest_amount >= price:
                     shares = int(invest_amount // price)

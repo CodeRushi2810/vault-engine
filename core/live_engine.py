@@ -77,9 +77,14 @@ class LiveExecutionEngine:
                     candle_interval=GrowwAPI.CANDLE_INTERVAL_MIN_15
                 )
                 
+                target_ts = int(start_dt.timestamp())
+                target_iso = start_dt.strftime('%Y-%m-%dT%H:%M:%S')
+                
                 candles = response.get("candles", [])
                 for c in candles:
-                    if c[0] == int(start_dt.timestamp()):
+                    if c[0] == target_ts or c[0] == target_iso:
+                        if None in (c[1], c[2], c[3], c[4], c[5]):
+                            raise ValueError("Invalid candle data with None values")
                         return stock, {
                             'open': float(c[1]),
                             'high': float(c[2]),
@@ -90,6 +95,8 @@ class LiveExecutionEngine:
                 
                 if candles:
                     c = candles[-1]
+                    if None in (c[1], c[2], c[3], c[4], c[5]):
+                        raise ValueError("Invalid candle data with None values")
                     return stock, {
                         'open': float(c[1]),
                         'high': float(c[2]),
@@ -332,6 +339,11 @@ class LiveExecutionEngine:
         update_agent_status("ExecutionEngine", "Finalizing memory block...", is_active=True)
         start_time = time.time()
         candle_ts = self.get_candle_start_time(now) - datetime.timedelta(minutes=15)
+        
+        # Skip the 09:00 block (pre-market has no real candles)
+        if candle_ts.hour == 9 and candle_ts.minute == 0:
+            return
+            
         log_and_broadcast(f"Step 6: Finalizing {candle_ts.strftime('%H:%M:%S')} block...")
         end_dt = now.replace(hour=16, minute=0, second=0)
         candles = self.fetch_live_candles(candle_ts, end_dt)

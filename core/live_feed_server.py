@@ -599,7 +599,15 @@ async def hermes_command(req: HermesCommand):
             with open(dash_path, "r") as f:
                 dash_data = json.load(f)
                 
-        response_text, ui_actions = await process_hermes_command(cmd, dash_data, BASE_DIR, genai_client)
+        # Inject live prices from the feed so Hermes doesn't hallucinate PNL using entry prices
+        global initial_prices
+        live_market_data = dash_data.get("market_data", {})
+        for sym, d in initial_prices.items():
+            if isinstance(d, dict) and "ltp" in d:
+                live_market_data[sym] = d["ltp"]
+        dash_data["market_data"] = live_market_data
+                
+        response_text, chat_text, ui_actions = await process_hermes_command(cmd, dash_data, BASE_DIR, genai_client)
         
         for action in ui_actions:
             delay = action.get("delay", 0)
@@ -610,8 +618,9 @@ async def hermes_command(req: HermesCommand):
     except Exception as e:
         logger.error(f"Hermes Error: {e}")
         response_text = "Sorry, I encountered an error while processing that."
+        chat_text = response_text
         
-    return {"response": response_text}
+    return {"response": response_text, "chat_response": chat_text}
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "system_config.json")
 
