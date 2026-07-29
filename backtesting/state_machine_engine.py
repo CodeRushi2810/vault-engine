@@ -338,6 +338,7 @@ class StateMachineEngine:
                 if self.balance < 10000:
                     self.latest_signals[stock]['executed'] = False
                     self.latest_signals[stock]['reason'] = 'Insufficient funds (< 10k)'
+                    self.latest_signals[stock]['quantity'] = 0
                     return
                 
                 # Cap at available balance to prevent negative cash
@@ -348,6 +349,7 @@ class StateMachineEngine:
                     if shares > 0:
                         self.latest_signals[stock]['executed'] = True
                         self.latest_signals[stock]['quantity'] = shares
+                        self.latest_signals[stock]['reason'] = 'Executed Successfully'
                         
                         cost = shares * price # friction removed
                         self.balance -= cost
@@ -359,10 +361,11 @@ class StateMachineEngine:
                     else:
                         self.latest_signals[stock]['executed'] = False
                         self.latest_signals[stock]['reason'] = 'Zero Qty'
+                        self.latest_signals[stock]['quantity'] = 0
                 else:
                     self.latest_signals[stock]['executed'] = False
                     self.latest_signals[stock]['reason'] = 'No Funds'
-
+                    self.latest_signals[stock]['quantity'] = 0
 
 def run_state_machine():
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -116,14 +116,32 @@ class LiveExecutionEngine:
                     logger.error(f"Failed to fetch live tick for {stock} after {max_retries} attempts: {e}")
         return stock, None
 
-    def fetch_live_candles(self, start_dt, end_dt):
+    def get_stocks_to_process(self):
+        active_stocks = set()
+        settings_file = os.path.join(BASE_DIR, "data", "system_config.json")
+        try:
+            with open(settings_file, "r") as f:
+                config = json.load(f)
+                stocks_config = config.get("stocks", {})
+                for stock in self.stocks:
+                    if stocks_config.get(stock, {}).get("active", True):
+                        active_stocks.add(stock)
+        except Exception as e:
+            logger.warning(f"Failed to read config, defaulting to all stocks: {e}")
+            active_stocks = set(self.stocks)
+            
+        open_position_stocks = {p.stock for p in self.engine.open_positions}
+        return list(active_stocks.union(open_position_stocks))
+
+    def fetch_live_candles(self, start_dt, end_dt, target_stocks=None):
+        if target_stocks is None:
+            target_stocks = self.stocks
+            
         candles_dict = {}
-        # Execute all 26 stocks concurrently, but stagger them by 0.35s each.
-        # 0.35s stagger = roughly 3 requests per second, completely avoiding rate limits.
-        # Total execution time: 26 * 0.35 = 9.1 seconds
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.stocks)) as executor:
+        # Execute target stocks concurrently, stagger them by 0.2s each to avoid rate limits
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(target_stocks)) as executor:
             future_to_stock = {}
-            for i, stock in enumerate(self.stocks):
+            for i, stock in enumerate(target_stocks):
                 future = executor.submit(self._fetch_single_live_candle, stock, start_dt, end_dt, i * 0.2)
                 future_to_stock[future] = stock
                 
@@ -194,6 +212,8 @@ class LiveExecutionEngine:
             if stock in processed_rows:
                 self.engine.process_candle(actual_dt, processed_rows[stock], self.strategies)
                 
+        # Launch async logger to record all 26 stock mathematical evaluations without blocking execution
+        asyncio.create_task(self.async_log_stock_evaluations(processed_rows, actual_dt, self.strategies, getattr(self.engine, 'ml_model', None), getattr(self.engine, 'ml_features', [])))
                 
         trades_executed = (len(self.engine.open_positions) != initial_open) or (len(self.engine.completed_trades) != initial_closed)
                 
@@ -242,6 +262,90 @@ class LiveExecutionEngine:
                 json.dump(self.engine.latest_signals, f, cls=NpEncoder)
         except Exception as e:
             logger.error(f"Failed to save latest signals: {e}")
+
+    async def async_log_stock_evaluations(self, processed_rows, timestamp, strategies, ml_model, ml_features):
+        def _log_worker(rows, ts, strats, model, feats):
+            import csv
+            import os
+            import pandas as pd
+            
+            log_dir = os.path.join(BASE_DIR, "Logs")
+            os.makedirs(log_dir, exist_ok=True)
+            
+            for stock, row in rows.items():
+                out_file = os.path.join(log_dir, f"test_ml_{stock}.csv")
+                
+                price = row.get('Close', 0)
+                if pd.isna(price) or price <= 0:
+                    price = row.get('Open', 0)
+                    
+                features_dict = {k: v for k, v in row.items() if k not in ['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume', 'Stock']}
+                
+                for strategy in strats:
+                    direction, _ = strategy.generate_signal(row)
+                    triggered = (direction == 1)
+                    
+                    confidence = 'N/A'
+                    if triggered and model is not None:
+                        feature_dict_strat = features_dict.copy()
+                        feature_dict_strat['Strategy'] = strategy.name
+                        
+                        df_features = pd.DataFrame([feature_dict_strat])
+                        df_features = pd.get_dummies(df_features, columns=['Strategy'])
+                        
+                        for col in feats:
+                            if col not in df_features.columns:
+                                df_features[col] = 0
+                        df_features = df_features[feats]
+                        
+                        probs = model.predict_proba(df_features)[0]
+                        confidence = probs[1]
+                        
+                    reason_parts = []
+                    if not triggered:
+                        if strategy.name == 'MACDCrossover':
+                            if features_dict.get('MACD_Cross_Up', 0) != 1:
+                                reason_parts.append("MACD didn't cross UP")
+                            if features_dict.get('RSI_Oversold_Recently', 0) != 1:
+                                reason_parts.append("RSI not recently oversold")
+                                
+                    reason = " & ".join(reason_parts) if reason_parts else ""
+
+                    row_data = {
+                        'Timestamp': ts.strftime('%Y-%m-%d %H:%M:%S'),
+                        'Stock': stock,
+                        'Price': round(price, 2) if isinstance(price, float) else price,
+                        'Strategy_Name': strategy.name,
+                        'Strategy_Triggered': triggered,
+                        'Reason': reason,
+                        'ML_Confidence': round(confidence, 4) if isinstance(confidence, float) else confidence,
+                    }
+                    
+                    for k, v in features_dict.items():
+                        if k in ['MACD_Cross_Up', 'MACD_Cross_Down', 'RSI_Oversold_Recently', 'Two_Consecutive_Red', 'Volume_Spike']:
+                            row_data[k] = bool(v)
+                        elif k == 'SuperTrend_Dir':
+                            row_data[k] = 'Uptrend' if v == 1 else 'Downtrend'
+                        elif isinstance(v, float):
+                            row_data[k] = round(v, 2)
+                        else:
+                            row_data[k] = v
+                            
+                    file_exists = os.path.exists(out_file)
+                    try:
+                        with open(out_file, 'a', newline='') as f:
+                            writer = csv.DictWriter(f, fieldnames=list(row_data.keys()))
+                            if not file_exists:
+                                writer.writeheader()
+                            writer.writerow(row_data)
+                    except PermissionError:
+                        logger.error(f"Permission denied: Could not log to {out_file}. Is it open in Excel?")
+
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _log_worker, processed_rows, timestamp, strategies, ml_model, ml_features)
+        except Exception as e:
+            logger.error(f"Background logging task failed: {e}")
 
     def _save_single_finalized_candle(self, stock, c, ts_str):
         csv_path = os.path.join(BASE_DIR, "data", stock, "15m_candles.csv")
@@ -303,8 +407,9 @@ class LiveExecutionEngine:
         
         end_dt = now.replace(hour=16, minute=0, second=0)
         
-        update_agent_status("ExecutionEngine", f"Fetching live ticks...", is_active=True)
-        candles = self.fetch_live_candles(candle_ts, end_dt)
+        target_stocks = self.get_stocks_to_process()
+        update_agent_status("ExecutionEngine", f"Fetching live ticks for {len(target_stocks)} active tracked assets...", is_active=True)
+        candles = self.fetch_live_candles(candle_ts, end_dt, target_stocks)
         await self.evaluate_and_trade(candles, candle_ts)
         
         # Log process metrics
@@ -346,7 +451,8 @@ class LiveExecutionEngine:
             
         log_and_broadcast(f"Step 6: Finalizing {candle_ts.strftime('%H:%M:%S')} block...")
         end_dt = now.replace(hour=16, minute=0, second=0)
-        candles = self.fetch_live_candles(candle_ts, end_dt)
+        target_stocks = self.get_stocks_to_process()
+        candles = self.fetch_live_candles(candle_ts, end_dt, target_stocks)
         self.save_finalized_candles(candles, candle_ts)
         
         update_agent_status("ExecutionEngine", "Awaiting timeframe close...", is_active=False)
