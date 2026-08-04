@@ -51,7 +51,7 @@ def is_market_open(dt: datetime.datetime = None):
         return False
         
     start = dt.replace(hour=9, minute=15, second=0, microsecond=0)
-    end = dt.replace(hour=15, minute=30, second=0, microsecond=0)
+    end = dt.replace(hour=15, minute=15, second=0, microsecond=0)
     
     return start <= dt <= end
 
@@ -74,7 +74,7 @@ def is_post_market(dt: datetime.datetime = None):
     if is_weekend(dt) or get_holiday_name(dt):
         return False
         
-    start = dt.replace(hour=15, minute=30, second=0, microsecond=0)
+    start = dt.replace(hour=15, minute=15, second=0, microsecond=0)
     end = dt.replace(hour=16, minute=0, second=0, microsecond=0)
     
     return start < dt <= end

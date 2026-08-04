@@ -24,8 +24,8 @@ def get_market_status():
         is_market_open = False
     else:
         last_trading_date = now.date()
-        # Check if currently in market hours (9:15 to 15:30)
-        is_market_open = (time(9, 15) <= now.time() < time(15, 30))
+        # Check if currently in market hours (9:15 to 15:15)
+        is_market_open = (time(9, 15) <= now.time() < time(15, 15))
         
     return is_market_open, last_trading_date
 
@@ -192,7 +192,7 @@ def main():
                 total_15m = update_csv_with_new_data(file_15m, df_15m, date_only=False)
                 inserted = total_15m - original_rows
                 if inserted > 0:
-                    logger.info(f"Synced {stock}. Inserted {inserted} new 15m candles.")
+                    logger.info(f"Synced {stock}. Inserted {inserted} new 15m candle(s).")
                 
 
         

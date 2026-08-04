@@ -3,10 +3,10 @@
 # Master dictionary mapping stock symbols to Groww instrument tokens.
 # To add a new stock, simply add its symbol and token here.
 STOCK_TOKENS = {
-    "GVT&D": "16783",
+    "VOLTAS": "3718",
+"GVT&D": "16783",
     "JUBLFOOD": "18096",
-    "SBIN": "3045",
-    "ANANTRAJ": "13620",
+"ANANTRAJ": "13620",
     "BBOX": "3435",
     "CGPOWER": "760",
     "EICHERMOT": "910",

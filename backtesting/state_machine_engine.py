@@ -203,17 +203,20 @@ class StateMachineEngine:
                         global_sell = config.get("global", {}).get("allowSell", True)
                         engine_active = config.get("global", {}).get("engineActive", True)
                         
-                        stock_config = config.get("stocks", {}).get(stock, {})
-                        stock_sell = stock_config.get("allowSell", True)
-                        
-                        # Note: we bypass stock_active here so that users can liquidate disabled stocks
-                        if not (engine_active and global_sell and stock_sell):
+                        stock_config = config.get("stocks", {}).get(stock)
+                        if stock_config is None:
                             can_sell = False
+                        else:
+                            stock_sell = stock_config.get("allowSell", False)
+                            # Note: we bypass stock_active here so that users can liquidate disabled stocks
+                            if not (engine_active and global_sell and stock_sell):
+                                can_sell = False
                 except:
                     pass
             
             should_exit = should_exit and can_sell
 
+            closed_summary = []
             for pos in stock_positions[:]:
                 # Update watermark
                 pos.highest_price = max(pos.highest_price, high)
@@ -241,14 +244,25 @@ class StateMachineEngine:
                         'PnL_Percent': pnl_percent,
                         'Win_Loss': 1 if pnl > 0 else 0
                     })
-                    
-                    pnl_str = f"+Rs {pnl:,.2f}" if pnl >= 0 else f"-Rs {abs(pnl):,.2f}"
-                    pnl_pct_str = f"+{pnl_percent:.2f}%" if pnl_percent >= 0 else f"{pnl_percent:.2f}%"
-                    icon = "🟢" if pnl >= 0 else "🔴"
-                    
-                    msg = f"{icon} Sold {pos.shares} {stock} at Rs {exit_price:,.2f} | Entry: Rs {pos.entry_price:,.2f} | PnL: {pnl_str} ({pnl_pct_str})"
-                        
-                    send_discord_message(msg)
+                    closed_summary.append({
+                        'shares': pos.shares,
+                        'cost': pos.cost,
+                        'pnl': pnl
+                    })
+
+            if closed_summary:
+                total_shares = sum(p['shares'] for p in closed_summary)
+                total_cost = sum(p['cost'] for p in closed_summary)
+                total_pnl = sum(p['pnl'] for p in closed_summary)
+                total_pnl_percent = (total_pnl / total_cost) * 100 if total_cost > 0 else 0.0
+                avg_entry = total_cost / total_shares if total_shares > 0 else 0.0
+                
+                pnl_str = f"+Rs {total_pnl:,.2f}" if total_pnl >= 0 else f"-Rs {abs(total_pnl):,.2f}"
+                pnl_pct_str = f"+{total_pnl_percent:.2f}%" if total_pnl_percent >= 0 else f"{total_pnl_percent:.2f}%"
+                icon = "🟢" if total_pnl >= 0 else "🔴"
+                
+                msg = f"{icon} Sold {total_shares} {stock} at Rs {price:,.2f} | Avg Entry: Rs {avg_entry:,.2f} | PnL: {pnl_str} ({pnl_pct_str})"
+                send_discord_message(msg)
                 
         # If all positions are closed, state goes to DETECTING
         if not any(p.stock == stock for p in self.open_positions):
@@ -268,14 +282,31 @@ class StateMachineEngine:
                     global_buy = config.get("global", {}).get("allowBuy", True)
                     engine_active = config.get("global", {}).get("engineActive", True)
                     
-                    stock_config = config.get("stocks", {}).get(stock, {})
-                    stock_active = stock_config.get("active", True)
-                    stock_buy = stock_config.get("allowBuy", True)
-                    
-                    if not (engine_active and global_buy and stock_active and stock_buy):
+                    stock_config = config.get("stocks", {}).get(stock)
+                    if stock_config is None:
                         can_trade = False
+                    else:
+                        stock_active = stock_config.get("active", False)
+                        stock_buy = stock_config.get("allowBuy", False)
+                        
+                        if not (engine_active and global_buy and stock_active and stock_buy):
+                            can_trade = False
             except:
                 pass
+        # Check 100D EMA variance limit
+        ema_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "100d_ema.json")
+        if can_trade and os.path.exists(ema_file):
+            try:
+                with open(ema_file, "r") as f:
+                    ema_data = json.load(f)
+                    stocks_data = ema_data.get("stocks", {})
+                    if stock in stocks_data:
+                        ema_100 = stocks_data[stock]["ema_100"]
+                        # Block buy if price is more than 3% above the 100D EMA
+                        if price > ema_100 * 1.03:
+                            can_trade = False
+            except Exception as e:
+                logger.error(f"Failed to read 100d_ema.json: {e}")
         
         if can_trade:
             best_signal = None

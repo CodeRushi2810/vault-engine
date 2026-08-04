@@ -434,7 +434,7 @@ class LiveExecutionEngine:
         now = datetime.datetime.now()
         status = get_market_status()
         if status != "OPEN":
-            if not (status == "POST_MARKET" and now.hour == 15 and now.minute == 30):
+            if not (status == "POST_MARKET" and now.hour == 15 and now.minute == 15):
                 return
 
         health = get_system_health()
@@ -475,15 +475,65 @@ class LiveExecutionEngine:
             with open(metrics_file, 'w') as f: json.dump(data, f)
         except Exception: pass
 
+    async def update_daily_emas(self):
+        log_and_broadcast("Running daily 100D EMA generation...")
+        update_agent_status("ExecutionEngine", "Running daily 100D EMA generation...", is_active=True)
+        try:
+            import subprocess
+            script_path = os.path.join(BASE_DIR, "scripts", "update_100d_ema.py")
+            subprocess.run([sys.executable, script_path], check=True)
+            log_and_broadcast("Successfully updated 100d_ema.json")
+        except Exception as e:
+            logger.error(f"Failed to run update_100d_ema.py: {e}")
+        update_agent_status("ExecutionEngine", "Resting...", is_active=False)
+
     def schedule_tasks(self):
         self.scheduler.add_job(self.trigger_preemptive, CronTrigger(minute='14,29,44,59', second='45'), misfire_grace_time=60)
         self.scheduler.add_job(self.trigger_finalize, CronTrigger(minute='0,15,30,45', second='5'), misfire_grace_time=60)
+        self.scheduler.add_job(self.update_daily_emas, CronTrigger(hour=16, minute=0, second=0), misfire_grace_time=120)
         self.scheduler.start()
 
     async def run(self):
         logger.info("Starting Execution Engine Pipeline (AETHER V2 Native API Mode)...")
         
         self.schedule_tasks()
+        
+        # Check if 100D EMA is stale
+        try:
+            import json, datetime
+            from core.market_utils import get_holiday_name, is_weekend
+            now = datetime.datetime.now()
+            
+            # Determine expected last trading session date
+            expected_date = now
+            if not (is_weekend(now) or get_holiday_name(now)) and now.hour >= 16:
+                expected_date = now
+            else:
+                expected_date = now - datetime.timedelta(days=1)
+                while is_weekend(expected_date) or get_holiday_name(expected_date):
+                    expected_date -= datetime.timedelta(days=1)
+            
+            expected_date_str = expected_date.strftime('%Y-%m-%d')
+            
+            is_stale = True
+            ema_file = os.path.join(BASE_DIR, "data", "100d_ema.json")
+            if os.path.exists(ema_file):
+                with open(ema_file, "r") as f:
+                    ema_data = json.load(f)
+                    
+                    # New format: top-level timestamp
+                    file_ts = ema_data.get("timestamp", "")
+                    if file_ts >= expected_date_str:
+                        is_stale = False
+            
+            if is_stale:
+                log_and_broadcast(f"100D EMA is stale (expected {expected_date_str}). Running update immediately at bootup...")
+                await self.update_daily_emas()
+            else:
+                log_and_broadcast(f"100D EMA is up-to-date (last updated {expected_date_str}). Bypassing bootup fetch.")
+                
+        except Exception as e:
+            logger.error(f"Error checking 100D EMA staleness: {e}")
         
         while True:
             await asyncio.sleep(3600)
