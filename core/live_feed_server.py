@@ -397,6 +397,12 @@ def start_groww_feed():
                     break
                 except Exception as e:
                     error_str = str(e).lower()
+                    if "401" in error_str or "unauthorized" in error_str:
+                        logger.warning("Auth token expired during initial fetch. Refreshing...")
+                        from core.auth import get_groww_token
+                        access_token = get_groww_token(force_refresh=True)
+                        groww = GrowwAPI(access_token)
+                        continue
                     if "rate limit" in error_str or "429" in error_str:
                         if attempt < max_retries - 1:
                             logger.warning(f"Rate limit hit for {symbol}. Retrying in {retry_delay}s...")
@@ -440,6 +446,14 @@ def start_groww_feed():
                 # If successful, NATS is running in background and handles its own reconnects. Break outer loop.
                 break
             except Exception as e:
+                error_str = str(e).lower()
+                if "401" in error_str or "unauthorized" in error_str:
+                    logger.warning("Auth token expired during NATS connection. Refreshing...")
+                    from core.auth import get_groww_token
+                    access_token = get_groww_token(force_refresh=True)
+                    groww = GrowwAPI(access_token)
+                    continue
+
                 logger.error(f"Error starting feed (NATS): {e}")
                 logger.info("Falling back to REST Polling for 5 minutes before retrying NATS...")
                 
@@ -462,12 +476,17 @@ def start_groww_feed():
                             time.sleep(0.15)
                         except Exception as poll_e:
                             error_str = str(poll_e).lower()
+                            if "401" in error_str or "unauthorized" in error_str:
+                                logger.warning("Auth token expired during REST polling. Refreshing...")
+                                from core.auth import get_groww_token
+                                access_token = get_groww_token(force_refresh=True)
+                                groww = GrowwAPI(access_token)
+                                break # Break the 5 min polling loop to reconnect to NATS with new token
                             if "rate limit" in error_str or "429" in error_str:
                                 time.sleep(5)
                             continue
     except Exception as e:
         logger.error(f"Error in start_groww_feed: {e}")
-
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

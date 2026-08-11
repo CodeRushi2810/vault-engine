@@ -128,11 +128,14 @@ def main():
     logger.info("Internet connection verified.")
     
     from core.auth import get_groww_token
-    try:
-        token = get_groww_token()
-        logger.info("Authenticated with Groww API. Session Token Cached.")
-    except Exception as e:
-        logger.error(f"Groww API Auth Failed: {e}")
+    while True:
+        try:
+            token = get_groww_token()
+            logger.info("Authenticated with Groww API. Session Token Cached.")
+            break
+        except Exception as e:
+            logger.error(f"Groww API Auth Failed: {e}. Retrying in 15 seconds...")
+            time.sleep(15)
     
     # Pre-generate static previous close prices for the UI
     update_agent_status("BootupCoordinator", "Generating static previous close prices for the UI...", is_active=True)

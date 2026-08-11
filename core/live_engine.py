@@ -107,6 +107,12 @@ class LiveExecutionEngine:
                 break # If no exception but empty, just break
             except Exception as e:
                 error_str = str(e).lower()
+                if "401" in error_str or "unauthorized" in error_str:
+                    logger.warning("Auth token expired in Live Engine. Refreshing...")
+                    from core.auth import get_groww_token
+                    access_token = get_groww_token(force_refresh=True)
+                    self.groww = GrowwAPI(access_token)
+                    continue
                 if "rate limit" in error_str or "429" in error_str:
                     if attempt < max_retries - 1:
                         time.sleep(retry_delay)

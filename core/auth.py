@@ -9,7 +9,7 @@ load_dotenv()
 # Global cache for the token
 _GROWW_TOKEN_CACHE = None
 
-def get_groww_token() -> str:
+def get_groww_token(force_refresh=False) -> str:
     """
     Centralized function to fetch and cache the Groww access token.
     Supports TOTP (No-Expiry) Flow via GROWW_TOTP_SECRET and GROWW_TOTP_KEY.
@@ -17,15 +17,21 @@ def get_groww_token() -> str:
     """
     global _GROWW_TOKEN_CACHE
     
+    if force_refresh:
+        _GROWW_TOKEN_CACHE = None
+        if 'GROWW_TOKEN' in os.environ:
+            del os.environ['GROWW_TOKEN']
+            
     # 1. Check if token is already cached in memory
     if _GROWW_TOKEN_CACHE:
         return _GROWW_TOKEN_CACHE
         
     # 2. Check if token was passed via environment variable by the parent process
-    env_token = os.environ.get('GROWW_TOKEN')
-    if env_token:
-        _GROWW_TOKEN_CACHE = env_token
-        return _GROWW_TOKEN_CACHE
+    if not force_refresh:
+        env_token = os.environ.get('GROWW_TOKEN')
+        if env_token:
+            _GROWW_TOKEN_CACHE = env_token
+            return _GROWW_TOKEN_CACHE
 
     # 3. Generate a new token using TOTP Flow (Preferred)
     totp_key = os.environ.get('GROWW_TOTP_KEY')
