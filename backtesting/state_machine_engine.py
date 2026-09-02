@@ -371,6 +371,13 @@ class StateMachineEngine:
                     self.latest_signals[stock]['reason'] = 'Insufficient funds (< 10k)'
                     self.latest_signals[stock]['quantity'] = 0
                     return
+
+                # Strict confidence rule for last 1 lakh
+                if self.balance <= 100000 and prob < 0.85:
+                    self.latest_signals[stock]['executed'] = False
+                    self.latest_signals[stock]['reason'] = 'Low confidence for last 1L'
+                    self.latest_signals[stock]['quantity'] = 0
+                    return
                 
                 # Cap at available balance to prevent negative cash
                 invest_amount = min(invest_amount, self.balance)
