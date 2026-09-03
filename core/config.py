@@ -3,6 +3,8 @@
 # Master dictionary mapping stock symbols to Groww instrument tokens.
 # To add a new stock, simply add its symbol and token here.
 STOCK_TOKENS = {
+    "OLECTRA": "10637",
+    "ZENTEC": "7508",
     "VOLTAS": "3718",
 "GVT&D": "16783",
     "JUBLFOOD": "18096",
