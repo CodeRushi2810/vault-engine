@@ -91,6 +91,7 @@ def get_previous_close_prices(force_refresh=False):
 
 def push_dashboard_to_mongo():
     logger.info("Pushing dashboard data to MongoDB offline snapshot...")
+    generate_matrix_targets()
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     json_path = os.path.join(BASE_DIR, "data", "dashboard_data.json")
     if not os.path.exists(json_path):
@@ -124,6 +125,12 @@ def push_dashboard_to_mongo():
                     except Exception:
                         pass
             
+            
+        config_path = os.path.join(BASE_DIR, "data", "system_config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r") as cf:
+                data["systemConfig"] = json.load(cf)
+                
         client = MongoClient(mongo_uri)
         db = client['vault_db']
         collection = db['dashboard_snapshot']
@@ -134,3 +141,52 @@ def push_dashboard_to_mongo():
         logger.info("Successfully pushed dashboard snapshot to MongoDB.")
     except Exception as e:
         logger.error(f"Failed to push dashboard snapshot to MongoDB: {e}")
+def generate_matrix_targets():
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ema_file = os.path.join(BASE_DIR, "data", "100d_ema.json")
+    config_file = os.path.join(BASE_DIR, "data", "system_config.json")
+    
+    if not os.path.exists(ema_file):
+        logger.warning("100d_ema.json not found, skipping matrix target generation.")
+        return
+        
+    try:
+        with open(ema_file, 'r') as f:
+            ema_data = json.load(f)
+            
+        sys_config = {}
+        if os.path.exists(config_file):
+            with open(config_file, 'r') as f:
+                sys_config = json.load(f)
+                
+        if "stocks" not in sys_config:
+            sys_config["stocks"] = {}
+            
+        for stock, info in ema_data.get("stocks", {}).items():
+            ema_val = info.get("ema_100")
+            if not ema_val: continue
+            
+            def round_to_5(x):
+                return round(x / 5.0) * 5
+                
+            b1 = round_to_5(ema_val)
+            b2 = round_to_5(b1 * 0.95)
+            b3 = round_to_5(b2 * 0.95)
+            s1 = round_to_5(b1 * 1.05)
+            s2 = round_to_5(s1 * 1.05)
+            s3 = round_to_5(s2 * 1.05)
+            
+            if stock not in sys_config["stocks"]:
+                sys_config["stocks"][stock] = {}
+                
+            sys_config["stocks"][stock]["targets"] = {
+                "b3": b3, "b2": b2, "b1": b1,
+                "s1": s1, "s2": s2, "s3": s3
+            }
+            
+        with open(config_file, 'w') as f:
+            json.dump(sys_config, f, indent=4)
+            
+        logger.info("Successfully generated matrix targets based on 100D EMA.")
+    except Exception as e:
+        logger.error(f"Error generating matrix targets: {e}")

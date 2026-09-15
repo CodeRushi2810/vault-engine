@@ -241,22 +241,30 @@ def main():
             time.sleep(5)
             
     except KeyboardInterrupt:
-        logger.info("Pipeline stopped by user. Cleaning up processes...")
+        logger.info("Pipeline stopped by user. Initiating teardown...")
+    except Exception as e:
+        logger.error(f"Pipeline crashed: {e}")
+    finally:
+        logger.info("Cleaning up and force-killing child process trees to release ports...")
         try:
             from core.data_utils import push_dashboard_to_mongo
             push_dashboard_to_mongo()
         except Exception as e:
             logger.error(f"Error pushing to mongo on exit: {e}")
             
-        if feed_process and feed_process.poll() is None:
-            feed_process.terminate()
-        if engine_process and engine_process.poll() is None:
-            engine_process.terminate()
-        if discord_process and discord_process.poll() is None:
-            discord_process.terminate()
-        if 'hermes_process' in locals() and hermes_process and hermes_process.poll() is None:
-            hermes_process.terminate()
-        logger.info("Cleanup complete. Exiting.")
+        def force_kill(proc):
+            if proc and proc.poll() is None:
+                try:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    proc.terminate()
+
+        force_kill(locals().get('feed_process'))
+        force_kill(locals().get('engine_process'))
+        force_kill(locals().get('discord_process'))
+        force_kill(locals().get('hermes_process'))
+            
+        logger.info("Cleanup complete. All bound ports released. Exiting.")
 
 if __name__ == "__main__":
     main()

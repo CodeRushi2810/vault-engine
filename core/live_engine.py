@@ -489,6 +489,11 @@ class LiveExecutionEngine:
             script_path = os.path.join(BASE_DIR, "scripts", "update_100d_ema.py")
             subprocess.run([sys.executable, script_path], check=True)
             log_and_broadcast("Successfully updated 100d_ema.json")
+            
+            # Automatically calculate B1-S3 targets and sync to MongoDB offline snapshot
+            from core.data_utils import push_dashboard_to_mongo
+            push_dashboard_to_mongo()
+            log_and_broadcast("Sync'd target matrix and dashboard snapshot to MongoDB")
         except Exception as e:
             logger.error(f"Failed to run update_100d_ema.py: {e}")
         update_agent_status("ExecutionEngine", "Resting...", is_active=False)

@@ -53,6 +53,15 @@ def send_discord_message(message):
         # Discord returns 204 No Content on success
         if response.status_code in [200, 204]:
             logger.info('Discord message sent successfully!')
+            
+            # Fire off an email alert in the background
+            try:
+                from core.email_notifier import send_email_alert
+                email_thread = threading.Thread(target=send_email_alert, args=(message,), daemon=True)
+                email_thread.start()
+            except Exception as e:
+                logger.error(f"Failed to trigger email alert thread: {e}")
+                
             return True
         else:
             logger.error(f'Failed to send Discord message: {response.text}')

@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vault â€” Trade Confirmation</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { margin: 0; padding: 0; background: #f4f6f8; font-family: 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #14213d; -webkit-font-smoothing: antialiased; letter-spacing: -0.01em; }
+        table { border-spacing: 0; border-collapse: collapse; }
+        img { border: 0; display: block; max-width: 100%; }
+        a { text-decoration: none; }
+        .email-wrapper { width: 100%; background: #f4f6f8; padding: 32px 0; }
+        .email-container { width: 656px; max-width: 656px; margin: 0 auto; background: #ffffff;  overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.05); }
+        .header { padding: 22px 32px; background: #ffffff; }
+        .logo { font-size: 28px; line-height: 1; font-weight: 700; letter-spacing: -1px; color: #14213d; }
+        .logo-dot { display: inline-block; width: 8px; height: 8px; background: #12b886; margin-left: 3px; }
+        .transaction-date { text-align: right; font-size: 13px; line-height: 18px; color: #52617a; font-weight: 400; }
+        .hero { background: {{BG_COLOR}}; padding: 40px 40px 70px; position: relative; overflow: hidden; }
+        .content { padding: 32px 40px 40px; background: #ffffff;  position: relative; margin-top: 0px; box-shadow: 0 -10px 20px rgba(0,0,0,0.08); border-top: 1px solid rgba(0,0,0,0.05); }
+        .company-logo { width: 56px; height: 56px; border-radius: 12px; background: #ffffff; border: 1px solid #e4e9ef; padding: 4px; box-sizing: border-box; text-align: center; }
+        .company-name { font-size: 18px; font-weight: 600; color: #17213a; padding-left: 16px; letter-spacing: -0.02em; }
+        .company-symbol { font-size: 13px; font-weight: 500; color: #6c7890; padding-left: 16px; padding-top: 2px; }
+        .divider { height: 1px; background: #e7ebf0; margin: 20px 0; }
+        .detail-label { font-size: 12px; font-weight: 500; color: #657187; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.03em; }
+        .detail-value { font-size: 16px; font-weight: 600; color: #18233d; }
+        .detail-column { vertical-align: top; padding-right: 12px; }
+        .cta { background: {{THEME_COLOR}}; border-radius: 8px; color: #ffffff !important; display: block; font-size: 15px; font-weight: 600; text-align: center; padding: 16px 24px; width: 100%; box-sizing: border-box; margin: 32px 0 12px; letter-spacing: 0.01em; }
+        .cta-subtitle { text-align: center; color: #6b778c; font-size: 12px; font-weight: 400; }
+        .footer { border-top: 1px solid #e3e8ee; padding: 32px 40px; background: #fafbfc; }
+        .footer-logo { font-size: 20px; font-weight: 700; color: #18233d; letter-spacing: -0.5px; }
+        .footer-tagline { font-size: 12px; color: #657187; padding-top: 6px; font-weight: 400; }
+        .support { text-align: right; color: #69758a; font-size: 12px; line-height: 20px; font-weight: 400; }
+    </style>
+</head>
+<body>
+    <table class="email-wrapper" width="100%">
+        <tr>
+            <td align="center">
+                <table class="email-container" width="656">
+                    <tr>
+                        <td class="header">
+                            <table width="100%">
+                                <tr>
+                                    <td><div class="logo">Vault<span class="logo-dot"></span></div></td>
+                                    <td><div class="transaction-date">{{TIMESTAMP}}<br>Transaction ID: {{TX_ID}}</div></td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="hero" style="padding: 0;">
+                            <img src="{{HERO_BANNER}}" alt="Hero Banner" style="width: 100%; display: block;" />
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="content">
+                            <table width="100%">
+                                <tr>
+                                    <td width="56"><div class="company-logo"><img src="{{STOCK_LOGO}}" width="48" height="48" style="background: #ffffff; border-radius: 8px; object-fit: contain;" alt="{{STOCK_NAME}}"></div></td>
+                                    <td><div class="company-name">{{STOCK_NAME}}</div><div class="company-symbol">NSE: {{STOCK_SYM}}</div></td>
+                                    
+                                </tr>
+                            </table>
+                            <div class="divider"></div>
+                            
+                            <table width="100%">
+                                <tr>
+                                    <td class="detail-column" width="25%">
+                                        <div class="detail-label">Quantity</div>
+                                        <div class="detail-value">{{QTY}} Shares</div>
+                                    </td>
+                                    <td class="detail-column" width="25%">
+                                        <div class="detail-label">{{LBL_PRICE}}</div>
+                                        <div class="detail-value">{{VAL_PRICE}}</div>
+                                    </td>
+                                    <td class="detail-column" width="25%">
+                                        <div class="detail-label">{{LBL_ORDER_TYPE}}</div>
+                                        <div class="detail-value">{{VAL_ORDER_TYPE}}</div>
+                                    </td>
+                                    <td class="detail-column" width="25%" style="display: {{R1_C4_DISPLAY}};">
+                                        <div class="detail-label">{{LBL_TOTAL}}</div>
+                                        <div class="detail-value">{{VAL_TOTAL}}</div>
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                            <div style="display: {{ROW2_DISPLAY}};">
+                                <div class="divider"></div>
+                                <table width="100%">
+                                    <tr>
+                                        <td class="detail-column" style="width: 100%;">
+                                            <div class="detail-label">{{LBL_R2}}</div>
+                                            <div class="detail-value" style="color: {{PROFIT_COLOR}}; font-size: 20px;">{{VAL_R2}}</div>
+                                        </td>
+                                    </tr>
+                                </table>
+                            </div>
+
+                            <div style="display: {{ROW3_DISPLAY}};">
+                                <div class="divider"></div>
+                                <table width="100%">
+                                    <tr>
+                                        <td class="detail-column" style="width: 50%;">
+                                            <div class="detail-label">Total Buy Value</div>
+                                            <div class="detail-value">{{VAL_TOTAL_BUY}}</div>
+                                        </td>
+                                        <td class="detail-column" style="width: 50%;">
+                                            <div class="detail-label">Total Sell Value</div>
+                                            <div class="detail-value">{{VAL_TOTAL_SELL}}</div>
+                                        </td>
+                                    </tr>
+                                </table>
+                            </div>
+                            <div class="divider"></div>
+                            
+                            <a href="https://vault-trading-dashboard.vercel.app/" class="cta">View Portfolio</a>
+                            <div class="cta-subtitle">Track your investments, returns &amp; performance on Vault.</div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="footer">
+                            <table width="100%">
+                                <tr>
+                                    <td valign="top">
+                                        <div class="footer-logo">Vault<span class="logo-dot"></span></div>
+                                        <div class="footer-tagline">Smart investing starts here.</div>
+                                    </td>
+                                    <td valign="top">
+                                        <div class="support">Need help? We're here for you.<br><strong>support@vault.in &nbsp;|&nbsp; 1800 123 4567</strong></div>
+                                        <div class="support" style="margin-top:12px;">&copy; {{YEAR}} Vault. All rights reserved.</div>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+
