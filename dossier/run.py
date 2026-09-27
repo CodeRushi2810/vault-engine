@@ -8,6 +8,9 @@
     python -m dossier.run agent --push     # same, and also push to the Next.js dashboard (MongoDB)
     python -m dossier.run agent --push --show backtest  # dashboard trades show the backtest account instead
     python -m dossier.run variants         # test the pre-registered rule variants on NETWEB + peers
+    python -m dossier.run publish          # push report.html to MongoDB for the web app
+
+The whole evening routine in one go:  python -m dossier.daily
 """
 import argparse
 import json
@@ -114,6 +117,19 @@ def cmd_agent(push, show="paper"):
         print(f"Pushed to MongoDB vault_db.dashboard_snapshot (previous snapshot saved to {backup})")
 
 
+def cmd_peers():
+    from dossier import peers
+    rows = peers.screen()
+    for r in rows:
+        if "note" in r:
+            print(f"{r['symbol']:<11} {r['note']}")
+            continue
+        lo, hi = r["resid_corr_ci95"]
+        print(f"{r['symbol']:<11} {r['role']:<5} days={r['overlap_days']:>4} "
+              f"resid_corr={r['resid_corr_daily']:.2f} ({lo:.2f}-{hi:.2f}) weekly={r['resid_corr_weekly']:.2f}")
+    _write(os.path.join(CACHE_DIR, universe.FOCUS, "peers.json"), rows)
+
+
 def cmd_variants():
     from dossier import agent
     table, verdicts = agent.variant_study()
@@ -137,6 +153,7 @@ def main():
     sub.add_parser("peers")
     sub.add_parser("check")
     sub.add_parser("variants")
+    sub.add_parser("publish")
     ag = sub.add_parser("agent")
     ag.add_argument("--push", action="store_true", help="also push to the Next.js dashboard (MongoDB)")
     ag.add_argument("--show", choices=["paper", "backtest"], default="paper",
@@ -150,16 +167,11 @@ def main():
     elif args.cmd == "build":
         cmd_build(args.symbol.upper(), not args.no_yahoo)
     elif args.cmd == "peers":
-        from dossier import peers
-        rows = peers.screen()
-        for r in rows:
-            if "note" in r:
-                print(f"{r['symbol']:<11} {r['note']}")
-                continue
-            lo, hi = r["resid_corr_ci95"]
-            print(f"{r['symbol']:<11} {r['role']:<5} days={r['overlap_days']:>4} "
-                  f"resid_corr={r['resid_corr_daily']:.2f} ({lo:.2f}-{hi:.2f}) weekly={r['resid_corr_weekly']:.2f}")
-        _write(os.path.join(CACHE_DIR, universe.FOCUS, "peers.json"), rows)
+        cmd_peers()
+    elif args.cmd == "publish":
+        from dossier.publish import publish
+        doc = publish()
+        print(f"Published {doc['_id']} ({doc['bytes'] / 1024:.0f} KB) to MongoDB vault_db.dossier_reports")
     elif args.cmd == "check":
         cmd_check()
     elif args.cmd == "variants":
