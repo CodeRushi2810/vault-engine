@@ -1,18 +1,23 @@
-"""Readable HTML report for a dossier. Written next to dossier.json.
+"""The dossier as a minimal, plain-language HTML report (report.html).
 
-Self-contained: one file, no network needed, charts drawn from embedded data.
+Written for someone who does not follow markets: the first tab says what
+the agent will do at the next open and why, every page leads with plain
+sentences, and technical tables sit inside "Details" panels.
+
+Self-contained apart from the web font (Modern Era if installed, else
+Manrope from Google Fonts, else the system font). Light/dark switch,
+tabs kept in the URL hash, charts redraw on resize and theme change.
 """
 import html
 import json
 import os
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 
 from dossier.universe import INDICES
 
-VERDICT_ORDER = ["validated", "consistent, not yet confirmed", "suggestive (not validated)", "no evidence", "insufficient data"]
-
+# ------------------------------------------------------------------ formatting
 
 def _d(iso):
     """ISO date -> '25 September 2026'."""
@@ -22,194 +27,23 @@ def _d(iso):
     return f"{d} {date(y, m, d):%B %Y}"
 
 
-def _pct(x, digits=1, sign=False):
+def _day(iso):
+    y, m, d = map(int, str(iso)[:10].split("-"))
+    return f"{date(y, m, d):%A} {d} {date(y, m, d):%B %Y}"
+
+
+def _e(s):
+    return html.escape(str(s))
+
+
+def _pct(x, digits=0, sign=False):
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return "—"
     return f"{x * 100:{'+' if sign else ''}.{digits}f}%"
 
 
-def _num(x, digits=2):
-    return "—" if x is None else f"{x:,.{digits}f}"
-
-
-def _esc(s):
-    return html.escape(str(s))
-
-
-def _headline(d):
-    w = d.get("what_happens_when") or {}
-    res = [r for r in w.get("results", [])]
-    counts = {v: sum(r["verdict"] == v for r in res) for v in VERDICT_ORDER}
-    active = w.get("now", {}).get("active", [])
-    tests = w.get("method", {}).get("tests", len(res))
-    lines = []
-    if counts["validated"]:
-        names = sorted({r["description"] for r in res if r["verdict"] == "validated"})
-        lines.append(f"<b>{counts['validated']}</b> of {tests} condition/horizon tests passed out-of-sample validation: "
-                     + "; ".join(_esc(n) for n in names) + ".")
-    else:
-        lines.append(f"<b>None</b> of the {tests} condition/horizon tests passed out-of-sample validation. "
-                     f"{counts['suggestive (not validated)']} looked promising on the full sample, which is about what "
-                     f"chance alone produces ({tests} × 5% ≈ {round(tests * 0.05)}). On this evidence, no condition "
-                     "tells you more about NETWEB's next week, month or quarter than a random day does.")
-    if active:
-        verdicts = {}
-        for a in active:
-            vs = {r["horizon"]: r["verdict"] for r in res if r["condition"] == a["condition"]}
-            verdicts[a["condition"]] = vs
-        parts = []
-        for a in active:
-            vs = verdicts[a["condition"]]
-            best = ("a validated edge" if "validated" in vs.values() else
-                    "a suggestive but unvalidated edge" if any(v.startswith("sugg") for v in vs.values()) else
-                    "no evidence of an edge")
-            parts.append(f"{_esc(a['description'].lower())} (since {_d(a['since'])}; history shows {best})")
-        lines.append("Right now: " + "; ".join(parts) + ".")
-    ev = d.get("events") or {}
-    er = ev.get("results", [])
-    if er:
-        strong = [r for r in er if r["verdict"] in ("validated", "consistent, not yet confirmed")]
-        if strong:
-            best = min(strong, key=lambda r: r["pooled"]["p"])
-            span = {"1w": "week", "1m": "month", "3m": "quarter"}
-            same = sorted((r for r in strong if r["condition"] == best["condition"]), key=lambda r: r["h"])
-            moves = " and ".join(f"{_pct(abs(r['pooled']['mean']), 1)} over the next {span[r['horizon']]}" for r in same)
-            word = "trail" if best["pooled"]["mean"] < 0 else "beat"
-            lines.append(f"<b>Events:</b> the strongest finding is <i>{_esc(best['description'].lower())}</i>. "
-                         f"Those stocks went on to {word} their peers by {moves} ({best['pooled']['n']} events). It passes the multiple-testing check and points the same way "
-                         "before and after the split, but the earlier half alone is not significant, so treat it as a "
-                         "risk rule to watch, not a proven edge.")
-        else:
-            lines.append(f"<b>Events:</b> none of the {ev.get('method', {}).get('tests', len(er))} event tests passed validation.")
-    return lines
-
-
-def render(dossier_path, panel):
-    with open(dossier_path) as f:
-        d = json.load(f)
-    a = d["anatomy"]
-    q = d["data_quality"]
-    w = d.get("what_happens_when") or {"results": [], "now": {"active": []}, "method": {}}
-    sym = d["symbol"]
-
-    agent_path = os.path.join(os.path.dirname(dossier_path), "agent.json")
-    agent_data = None
-    if os.path.exists(agent_path):
-        with open(agent_path) as f:
-            agent_data = json.load(f)
-    agent_html, agent_series = _agent_html(agent_data)
-
-    close = panel["Close"].dropna()
-    dd = close / close.cummax() - 1
-    series = {
-        "dates": [x.date().isoformat() for x in close.index],
-        "close": [round(float(v), 2) for v in close.values],
-        "dd": [round(float(v), 4) for v in dd.values],
-    }
-    cond_rows = _rows(w["results"])
-    ev = d.get("events") or {"results": [], "results_profile": {}, "focus_recent": [], "upcoming": [], "method": {}}
-    event_rows = _rows(ev["results"])
-    events_html = _events_html(ev, sym)
-    score_html, revenue_series = _scorecard_html(ev.get("scorecard") or {})
-
-    ret, vol, dr, fr, rel = a["returns"], a["volatility"], a["drawdowns"], a["forward_returns"], a["relationships"]
-    last_close = series["close"][-1]
-    as_of = d["history"]["last"]
-
-    tiles = [
-        ("Last close", f"₹{last_close:,.2f}", _d(as_of)),
-        ("Growth per year since listing", _pct(ret["cagr"], 0), f"{ret['years']} years of history"),
-        ("Volatility (annual)", _pct(vol["rv20_now"], 0) + " now", f"{_pct(ret['ann_vol'], 0)} over its whole history"),
-        ("Typical daily range (ATR)", _pct(vol["atr14_pct_now"]), f"median {_pct(vol['atr14_pct_median'])}"),
-        ("Below its peak", _pct(dr["current_drawdown"], 0), f"worst ever {_pct(dr['max_drawdown'], 0)}"),
-        ("Volatility regime", vol["regime_now"].capitalize(), f"{_pct(vol['rv20_percentile_now'], 0)} percentile"),
-    ]
-    tiles_html = "".join(f'<div class="tile"><div class="tl">{_esc(l)}</div><div class="tv">{v}</div>'
-                         f'<div class="ts">{_esc(s)}</div></div>' for l, v, s in tiles)
-
-    fwd_rows = "".join(
-        f"<tr><td>{k}</td><td class=n>{x['n_independent']}</td><td class=n>{_pct(x['mean'], 1, True)}</td>"
-        f"<td class=n>{(_pct(x['mean_ci95'][0], 1, True) + ' to ' + _pct(x['mean_ci95'][1], 1, True)) if x.get('mean_ci95') else '<span class=muted>too few to say</span>'}</td>"
-        f"<td class=n>{_pct(x['p_positive'], 0)}</td><td class=n>{_pct(x['p10'], 0, True)}</td><td class=n>{_pct(x['p90'], 0, True)}</td>"
-        f"<td class=n>{_pct(x['median_worst_dip'], 1)}</td></tr>"
-        for k, x in fr.items() if "mean" in x)
-
-    rel_rows = "".join(
-        f"<tr{' class=hl' if k == rel.get('best_fit_index') else ''}><td>{_esc(INDICES.get(k, k))}</td>"
-        f"<td class=n>{x['beta']:.2f}</td><td class=n>{x['downside_beta']:.2f}</td><td class=n>{x['upside_beta']:.2f}</td>"
-        f"<td class=n>{_pct(x['r_squared'], 0)}</td><td class=n>{x['n_days']}</td></tr>"
-        for k, x in rel.items() if isinstance(x, dict))
-
-    peers_path = os.path.join(os.path.dirname(dossier_path), "peers.json")
-    peer_rows = ""
-    if os.path.exists(peers_path):
-        with open(peers_path) as f:
-            for p in json.load(f):
-                if "resid_corr_daily" in p:
-                    lo, hi = p["resid_corr_ci95"]
-                    peer_rows += (f"<tr><td>{_esc(p['symbol'])}</td><td>{_esc(p['role'])}</td>"
-                                  f"<td class=n>{p['resid_corr_daily']:.2f}</td><td class=n>{lo:.2f} to {hi:.2f}</td>"
-                                  f"<td class=n>{p['overlap_days']}</td><td class=n>{_pct(p['ann_vol'], 0)}</td></tr>")
-
-    now_rows = ""
-    for act in w["now"].get("active", []):
-        vs = {r["h"]: r for r in cond_rows if r["key"] == act["condition"]}
-        cells = "".join(f"<td>{_badge(vs[h]['verdict'])} <span class=n>{_pct(vs[h]['edge'], 1, True)}</span></td>" if h in vs else "<td>—</td>"
-                        for h in ("1w", "1m", "3m"))
-        now_rows += (f"<tr><td>{_esc(act['description'])}</td><td>{_d(act['since'])}</td>"
-                     f"<td class=n>{act['sessions_since_onset']}</td>{cells}</tr>")
-    if not now_rows:
-        now_rows = "<tr><td colspan=6 class=muted>No tracked condition is active at the latest close.</td></tr>"
-
-    issues = q.get("stock", [])
-    issue_rows = "".join(f"<li><b>{_esc(i['check'].replace('_', ' '))}</b> — {_esc(i['detail'])}</li>" for i in issues) \
-        or "<li>No problems found in the NSE bars.</li>"
-    yc = q.get("yahoo_crosscheck", {})
-    yahoo_line = (f"Yahoo agrees on {yc.get('common_days', 0) - len(yc.get('close_mismatch_days', []))} of "
-                  f"{yc.get('common_days', 0)} shared sessions. Differences: "
-                  f"{', '.join(_d(x) for x in yc.get('close_mismatch_days', [])) or 'none'}; "
-                  f"{yc.get('yahoo_placeholder_days', 0)} Yahoo placeholder bars set aside; "
-                  f"{yc.get('missing_in_yahoo', 0)} NSE sessions Yahoo lacks.") if "common_days" in yc else \
-        f"Cross-check unavailable: {_esc(yc.get('error', 'not run'))}"
-    ca = q.get("corporate_actions_applied", [])
-    ca_line = "; ".join(f"{_d(c['ex_date'])}: {_esc(c['subject'])}" for c in ca) or "None since listing."
-
-    m = w.get("method", {})
-    headline = "".join(f"<p>{l}</p>" for l in _headline(d))
-    page = TEMPLATE.format(
-        sym=_esc(sym), as_of=_d(as_of), generated=_d(d["generated_at"][:10]),
-        first=_d(d["history"]["first"]), bars=d["history"]["bars"],
-        headline=headline, tiles=tiles_html, fwd_rows=fwd_rows, rel_rows=rel_rows, agent=agent_html,
-        peer_rows=peer_rows or "<tr><td colspan=6 class=muted>Run <code>python -m dossier.run peers</code>.</td></tr>",
-        now_rows=now_rows, issue_rows=issue_rows, yahoo_line=yahoo_line, ca_line=ca_line,
-        pool=", ".join(m.get("pool", [])), val_start=_d(m.get("validation_start")), tests=m.get("tests", "—"),
-        abn_vs=_esc(m.get("abnormal_vs", "")), best_fit=_esc(INDICES.get(rel.get("best_fit_index"), "—")),
-        worst_dd=_pct(-dr['max_drawdown'], 0), worst_peak=_d(_worst(dr)[0]), worst_trough=_d(_worst(dr)[1]),
-        legend=LEGEND, ev_tiles=events_html["tiles"], ev_table=events_html["table"], ev_upcoming=events_html["upcoming"],
-        ev_recent=events_html["recent"], ev_tests=events_html["tests"], ev_cut=events_html["cut"],
-        scorecard=score_html,
-        data=json.dumps({"series": series, "conds": cond_rows, "events": event_rows, "revenue": revenue_series, "agent": agent_series}),
-    )
-    out = os.path.join(os.path.dirname(dossier_path), "report.html")
-    with open(out, "w", encoding="utf-8") as f:
-        f.write(page)
-    print(f"Wrote {out}")
-    return out
-
-
-def _rows(results):
-    return [{
-        "key": r["condition"], "desc": r["description"], "h": r["horizon"], "verdict": r["verdict"],
-        "edge": r["pooled"].get("mean"), "ci": r["pooled"].get("ci95"), "p": r["pooled"].get("p"),
-        "n": r["pooled"].get("n"), "clusters": r["pooled"].get("clusters"),
-        "disc": r["discovery"].get("mean"), "val": r["validation"].get("mean"),
-        "nw_n": r["netweb"].get("n"), "nw_est": r["netweb_estimate"], "raw": r["pooled_raw"].get("mean"),
-        "hit": r["pooled"].get("hit_rate"), "baseline": r.get("baseline"),
-    } for r in results]
-
-
 def _inr(x):
-    """Indian digit grouping: 5904417 -> '59,04,417'."""
+    """Indian grouping: 5904417 -> '₹59,04,417'."""
     if x is None:
         return "—"
     neg, n = x < 0, f"{abs(x):.0f}"
@@ -217,609 +51,871 @@ def _inr(x):
     while len(head) > 2:
         tail = head[-2:] + "," + tail
         head = head[:-2]
-    s = (head + "," + tail) if head else tail
-    return ("−₹" if neg else "₹") + s
+    return ("−₹" if neg else "₹") + ((head + "," + tail) if head else tail)
 
 
-def _agent_html(ag):
-    """The trading agent section: paper ledger first, then the backtest."""
-    if not ag:
-        return ("<h2>Trading agent</h2><div class='card'><p class=muted>No agent run yet. Run "
-                "<code>python -m dossier.run agent</code> after the close.</p></div>"), None
-    p, bt = ag["paper"], ag["backtest"]
-    cap = ag["capital"]
-    ret = p["equity"] / cap - 1
-    last = p["decisions"][-1] if p["decisions"] else {}
-    stance = (last.get("stance") or "—").upper()
-    pend = p.get("pending")
-    pos = p.get("open")
-    order_txt = "No order"
-    if pend:
-        if pend["side"] == "buy":
-            order_txt = f"BUY at the next open, about {pend['weight']:.0%} of the account"
-        elif pend["side"] == "add":
-            order_txt = f"ADD {pend['weight']:.0%} of the account at the next open"
-        elif pend["side"] == "trim":
-            order_txt = f"TRIM {pend['shares']} shares at the next open"
-        else:
-            order_txt = "SELL everything at the next open"
-    tiles = [
-        ("Paper account value", _inr(p["equity"]), f"{ret:+.1%} vs the {_inr(cap)} start"),
-        ("Cash", _inr(p["cash"]), f"{p['cash'] / p['equity']:.0%} of the account"),
-        ("Position", f"{pos['shares']} shares" if pos else "None",
-         f"bought at ₹{pos['entry_price']:,.2f} · {_inr(pos['pnl'])} ({pos['pnl_pct']:+.1f}%)" if pos else "flat"),
-        (f"Decision at the close of {_d(last.get('date'))}", stance, order_txt),
-    ]
-    tiles_html = "".join(f'<div class="tile"><div class="tl">{_esc(l)}</div><div class="tv">{_esc(v)}</div>'
-                         f'<div class="ts">{_esc(s)}</div></div>' for l, v, s in tiles)
-    why = [w for w in ((pend or {}).get("reason") or last.get("reason") or "").split(" | ") if w]
-    why_html = "".join(f"<li>{_esc(w)}</li>" for w in why) or "<li class=muted>No change: holding, no new signal.</li>"
-
-    def trade_rows(rows, reasons=True):
-        out = ""
-        for t in reversed(rows):
-            cls = "pos" if t["pnl"] > 0 else "neg"
-            out += (f"<tr><td>{'<b>Open</b>' if t['status'] == 'OPEN' else 'Closed'}</td>"
-                    f"<td>{_d(t['entry'])}</td><td class=n>₹{t['entry_price']:,.2f}</td>"
-                    f"<td>{'—' if t['status'] == 'OPEN' else _d(t['exit'])}</td>"
-                    f"<td class=n>₹{t['exit_price']:,.2f}{' <span class=muted>(now)</span>' if t['status'] == 'OPEN' else ''}</td>"
-                    f"<td class=n>{t['shares']:,}</td><td class='n {cls}'>{_inr(t['pnl'])}</td>"
-                    f"<td class='n {cls}'>{t['pnl_pct']:+.1f}%</td>"
-                    + (f"<td class=why>{_esc(t['exit_reason'].split(' | ')[0]) if t['exit_reason'] else '<span class=muted>still held</span>'}</td>" if reasons else "")
-                    + "</tr>")
-        return out
-
-    head = ("<tr><th>Status</th><th>Bought</th><th class=n>Price</th><th>Sold</th><th class=n>Price</th>"
-            "<th class=n>Shares</th><th class=n>P&amp;L</th><th class=n>%</th><th>Why it sold</th></tr>")
-    paper_rows = trade_rows(p["trades"] + ([pos] if pos else []))
-    if not paper_rows:
-        paper_rows = (f"<tr><td colspan=9 class=muted>No fills yet. The paper account started on {_d(p['start'])}; "
-                      "orders fill at the next session's open, the next time the agent runs.</td></tr>")
-    log = "".join(f"<tr><td>{_d(x['date'])}</td><td>{_esc((x['stance'] or '').upper())}</td>"
-                  f"<td>{_esc((x['order'] or '—').upper())}</td><td class=why>{_esc((x['reason'] or '').replace(' | ', ' · '))}</td></tr>"
-                  for x in reversed(p["decisions"]))
-
-    rows = [(c["id"], c["name"], c["metrics"]) for c in bt["configs"]] + [(b["id"], b["name"], b["metrics"]) for b in bt["benchmarks"]]
-    cfg_rows = "".join(
-        f"<tr{' class=hl' if i == 'A' else ''}><td><b>{_esc(i)}</b></td><td>{_esc(n.split('. ', 1)[-1])}</td>"
-        f"<td class=n>{m['total_return_pct']:+.0f}%</td><td class=n>{m['cagr_pct']:.0f}%</td>"
-        f"<td class=n>{m['max_drawdown_pct']:.0f}%</td><td class=n>{m['sharpe']:.2f}</td>"
-        f"<td class=n>{m.get('trades') if m.get('trades') is not None else '—'}</td>"
-        f"<td class=n>{_inr(cap * (1 + m['total_return_pct'] / 100))}</td></tr>"
-        for i, n, m in rows)
-    verdicts = ""
-    if ag.get("variants"):
-        verdicts = "".join(
-            f"<li><b>{_esc(v['name'].split(':')[0])}</b>: {'kept' if v['keep'] else 'rejected'}. "
-            f"Sharpe up on the focus stock: {'yes' if v['focus_sharpe_up'] else 'no'}; on {v['peers_sharpe_up']} of "
-            f"{v['peers']} peers; peers' median worst drawdown {v['peer_median_dd_base']:.0f}% → {v['peer_median_dd_variant']:.0f}%.</li>"
-            for v in ag["variants"]["verdicts"].values())
-        verdicts = (f"<div class='card'><p><b>Rule variants tested</b> <span class=muted>({_esc(ag['variants']['keep_rule'])})</span></p>"
-                    f"<ul>{verdicts}</ul></div>")
-
-    html_ = f"""<h2>Trading agent: paper account</h2>
-<p class="sub">{_esc(ag['policy'])} · paper trading since {_d(p['start'])} · starts with {_inr(cap)} and grows only by its own profit. Run <code>python -m dossier.run agent</code> after the close; orders fill at the next open.</p>
-<div class="tiles">{tiles_html}</div>
-<div class="card"><p><b>Why</b></p><ul>{why_html}</ul></div>
-<div class="card scroll"><p><b>Paper trades</b></p><table>{head}{paper_rows}</table></div>
-<details><summary>Decision log (last {len(p['decisions'])} sessions)</summary><div class="card scroll"><table><tr><th>Close of</th><th>Stance</th><th>Order</th><th>Reasoning</th></tr>{log}</table></div></details>
-
-<h2>Trading agent: backtest</h2>
-<p class="sub">The same rules replayed from {_d(bt['start'])} to {_d(bt['end'])}, each account starting at {_inr(cap)}, net of charges (about {ag['costs_round_trip_pct_at_5L']:.2f}% per round trip at ₹5 lakh). In-sample: the exit rule was found on data that includes these events, so this does not prove the rule works; only the paper account above can.</p>
-<div class="legend"><span><i style="background:var(--series-1)"></i>A. Agent</span><span><i style="background:var(--series-2)"></i>Buy &amp; hold</span><span><i style="background:var(--series-3)"></i>Nifty 50</span></div>
-<div class="card"><div class="chart" id="agentEq"></div></div>
-<div class="card scroll"><table><tr><th></th><th>Config</th><th class=n>Return</th><th class=n>CAGR</th><th class=n>Worst drawdown</th><th class=n>Sharpe</th><th class=n>Trades</th><th class=n>₹10 lakh became</th></tr>{cfg_rows}</table></div>
-<div class="card scroll"><p><b>Backtest trades (config A)</b></p><table>{head}{trade_rows(bt['trades'])}</table></div>
-{verdicts}"""
-    series = {"A": bt["equity"]["A"], "CONTROL": bt["equity"]["CONTROL"], "NIFTY": bt["equity"]["NIFTY"]}
-    return html_, series
+def _words(x):
+    """Rupees in words people use: ₹7.6 lakh, ₹2,507 crore."""
+    if x is None:
+        return "—"
+    a = abs(x)
+    s = f"₹{a / 1e7:,.0f} crore" if a >= 1e9 else f"₹{a / 1e7:,.1f} crore" if a >= 1e7 else f"₹{a / 1e5:,.1f} lakh" if a >= 1e5 else _inr(a)
+    s = s.replace(".0 lakh", " lakh").replace(".0 crore", " crore")
+    return ("−" if x < 0 else "") + s
 
 
-def _cr(rupees, digits=0):
-    return "—" if rupees is None else f"₹{rupees / 1e7:,.{digits}f} cr"
+def _next_trading_day(iso):
+    y, m, d = map(int, iso.split("-"))
+    nd = date(y, m, d) + timedelta(days=1)
+    while nd.weekday() >= 5:
+        nd += timedelta(days=1)
+    return nd.isoformat()
 
 
-def _scorecard_html(sc):
+def _plain_reason(r):
+    """'Bad results: Results of 02 May 2026: first reaction -4.3% vs market.' -> plain English."""
+    import re
+    m = re.search(r"Results of (\d+) (\w+ \d{4}): first reaction ([+-]?[\d.]+)% vs (?:the )?market", r)
+    if m:
+        move = float(m.group(3))
+        return (f"Disappointing results on {int(m.group(1))} {m.group(2)}: the share did {abs(move):.1f}% "
+                f"{'worse' if move < 0 else 'better'} than the market that day.")
+    m = re.search(r"Net profit ([+-]?\d+)% vs a year ago", r)
+    if m:
+        return f"Profit came in {abs(int(m.group(1)))}% lower than a year earlier."
+    if "Price stop" in r:
+        return "The price fell sharply below its recent high."
+    if "not growing" in r:
+        return "Sales fell below a year earlier."
+    return r
+
+
+def _stat(label, value, note="", tone=""):
+    return (f'<div class="stat"><div class="label">{_e(label)}</div>'
+            f'<div class="value {tone}">{value}</div><div class="note">{note}</div></div>')
+
+
+def _details(summary, body):
+    return f'<details class="more"><summary>{_e(summary)}</summary><div class="more-body">{body}</div></details>'
+
+
+def _table(head, rows, cls=""):
+    th = "".join(f"<th{' class=n' if h.startswith('#') else ''}>{_e(h.lstrip('#'))}</th>" for h in head)
+    return f'<div class="scroll"><table class="{cls}"><thead><tr>{th}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+
+
+RATING_WORD = {"upgrade": "upgraded", "downgrade": "downgraded", "reaffirm": "reaffirmed", "assigned": "assigned",
+               "outlook_positive": "outlook raised", "outlook_negative": "outlook cut"}
+
+PLAIN_LABEL = {
+    "above_200dma": "Price rises back above its long-term average", "below_200dma": "Price falls below its long-term average",
+    "golden_cross": "Short-term average rises above the long-term one", "death_cross": "Short-term average falls below the long-term one",
+    "new_6m_high": "Price reaches a 6-month high", "strong_3m_momentum": "An unusually strong three months",
+    "weak_3m_momentum": "An unusually weak three months", "rel_strength_top": "Far ahead of other small companies",
+    "rel_strength_bottom": "Far behind other small companies", "rsi_oversold": "After heavy selling (“oversold”)",
+    "rsi_overbought": "After heavy buying (“overbought”)", "stretched_down": "Price far below its recent average",
+    "stretched_up": "Price far above its recent average", "drawdown_25": "Price 25% or more below its 6-month high",
+    "drawdown_40": "Price 40% or more below its 6-month high", "down_streak_4": "Four falling days in a row",
+    "vol_squeeze": "Unusually calm trading", "vol_stormy": "Unusually jumpy trading",
+    "volume_spike_up": "Very heavy trading on a rising day", "volume_spike_down": "Very heavy trading on a falling day",
+    "delivery_accumulation": "Buyers keeping the shares, on a rising day", "delivery_distribution": "Many shares handed over, on a falling day",
+    "delivery_qty_surge": "Unusually many shares change owners for good", "gap_up_4": "Opens 4% or more above the day before",
+    "gap_down_4": "Opens 4% or more below the day before", "market_below_200": "Small companies overall fall below their long-term average",
+    "vix_high": "The market's fear gauge is high",
+    "results_all": "Any results day", "results_strong": "Results day: share beats the market by 3% or more",
+    "results_weak": "Results day: share trails the market by 3% or more", "results_muted": "Results day: share moves with the market",
+    "order_win": "Announces an order win", "credit_rating": "Any credit-rating news", "acquisition": "Announces an acquisition",
+    "management_exit": "A director or senior manager leaves", "exchange_query": "The exchange asks about an unusual price move",
+    "large_holder_filing": "A big shareholder reports a trade", "investor_meet": "Meets big investors",
+    "inst_deal_buy": "A fund buys a large block of shares", "inst_deal_sell": "A fund sells a large block of shares",
+    "deal_net_buy": "Another large block of shares bought", "deal_net_sell": "Another large block of shares sold",
+    "promoter_cut": "Founders reduce their stake", "promoter_raise": "Founders increase their stake",
+    "rev_accel": "Results: sales growth speeds up", "rev_decel": "Results: sales growth slows down",
+    "margin_expand": "Results: profit margin widens", "margin_compress": "Results: profit margin narrows",
+    "profit_decline": "Results: profit lower than a year earlier", "rating_upgrade": "Credit rating upgraded",
+    "rating_downgrade": "Credit rating downgraded", "rating_reaffirm": "Credit rating kept the same",
+    "order_large": "Wins a big order (5%+ of a year's sales)", "order_small": "Wins a smaller order",
+}
+
+PLAIN_VERDICT = {"validated": "Proven", "consistent, not yet confirmed": "Promising, not yet proven",
+                 "suggestive (not validated)": "A weak hint", "no evidence": "No effect", "insufficient data": "Too little data"}
+
+# ------------------------------------------------------------------ sections
+
+def _today(ag, sym, ev):
+    t = ag.get("today") if ag else None
+    if not t:
+        return "<section class='hero'><p class='eyebrow'>Signal</p><h2 class='statement'>No signal yet</h2>" \
+               "<p class='lede'>Run <code>python -m dossier.run agent</code> after the market closes.</p></section>"
+    nxt = _next_trading_day(t["as_of"])
+    pos = ag["paper"].get("open")
+    held = pos["shares"] if pos else 0
+    if t["action"] == "buy":
+        statement = f"Buy {t['shares']:,} shares"
+        detail = (f"of {sym} at the opening price on {_day(nxt)}. That is about <b>{_words(t['ref_value'])}</b>, "
+                  f"{_pct(t['weight'])} of the {_words(t['equity'])} account, at the last closing price of ₹{t['ref_price']:,.2f}.")
+    elif t["action"] == "add":
+        statement = f"Buy {t['shares']:,} more shares"
+        detail = f"at the opening price on {_day(nxt)}, about {_words(t['ref_value'])}."
+    elif t["action"] == "trim":
+        statement = f"Sell {t['shares']:,} shares"
+        detail = f"at the opening price on {_day(nxt)}, keeping the rest."
+    elif t["action"] == "sell":
+        statement = f"Sell all {t['shares']:,} shares"
+        detail = f"at the opening price on {_day(nxt)}, about {_words(t['ref_value'])} at the last closing price."
+    elif t["action"] == "hold":
+        statement = f"Hold {held:,} shares"
+        detail = f"No trade on {_day(nxt)}. The reasons for owning {sym} still hold."
+    else:
+        statement = "No trade"
+        detail = f"Stay in cash on {_day(nxt)}."
+
+    why = []
+    if t["revenue_yoy"] is not None:
+        mult = 1 + t["revenue_yoy"]
+        grow = (f"{mult:.1f}× what it was a year earlier" if mult >= 1.5 else f"{_pct(t['revenue_yoy'], 0, True)} on a year earlier")
+        verdict = "The business is growing" if t["revenue_yoy"] > 0 else "The business is shrinking"
+        why.append(f"<b>{verdict}.</b> Sales in the latest quarter ({_e(t['growth_note'].split('(quarter ended ')[-1].rstrip(')'))}) "
+                   f"were {grow}.")
+    if t["cooling_sessions_left"] > 0:
+        why.append(f"<b>It is waiting after disappointing results.</b> {t['cooling_sessions_left']} more trading days "
+                   "before it may buy again.")
+    elif t["last_bad_results"]:
+        why.append(f"<b>No recent warning from results.</b> The last disappointing results were on {_d(t['last_bad_results'])}; "
+                   f"the {t['cool_off']}-day wait that followed is over.")
+    if t["action"] in ("buy", "add") and t["vol63"]:
+        why.append(f"<b>It invests {_pct(t['weight'])}, not everything,</b> because this share swings a lot "
+                   f"(about {_pct(t['vol63'])} a year). Keeping {_pct(1 - t['weight'])} in cash limits how much a bad month can hurt.")
+    why_html = "".join(f"<li>{w}</li>" for w in why)
+
+    sell_rules = (f"<li>Results disappoint: on results day the share does at least {_pct(t['reaction_cut'])} worse than the "
+                  "market, or profit comes in lower than a year earlier.</li>"
+                  "<li>Sales fall below the same quarter a year earlier.</li>")
+    up = (ev or {}).get("upcoming") or []
+    prof = (ev or {}).get("results_profile") or {}
+    q2 = [r["meeting"] for r in prof.get("focus_table", []) if r["meeting"][5:7] in ("10", "11")]
+    nxt_results = (f"Next results: {_d(up[0]['date'])}." if up else
+                   "Next results: not announced yet" + (f" (last year's came out on {_d(q2[-1])})." if q2 else "."))
+
+    p = ag["paper"]
+    profit = p["equity"] - ag["capital"]
+    acct = "".join([
+        _stat("Account value", _inr(p["equity"]), f"started with {_inr(ag['capital'])}"),
+        _stat("Profit so far", _inr(profit), _pct(profit / ag["capital"], 1, True), "up" if profit > 0 else "down" if profit < 0 else ""),
+        _stat("Cash", _inr(p["cash"]), f"{_pct(p['cash'] / p['equity'])} of the account"),
+        _stat("Shares held", f"{held:,}" if held else "None", f"bought at ₹{pos['entry_price']:,.2f}" if pos else "nothing bought yet"),
+    ])
+    return f"""
+<section class="hero">
+  <p class="eyebrow">The agent's instruction for the next trading day</p>
+  <h2 class="statement">{_e(statement)}</h2>
+  <p class="lede">{detail}</p>
+  <p class="fine">Decided at the close on {_d(t['as_of'])}. Paper trading only: no real order is placed. Not investment advice.</p>
+</section>
+<div class="two">
+  <section><h3>Why</h3><ul class="plain">{why_html}</ul></section>
+  <section><h3>What would make it sell</h3><ul class="plain">{sell_rules}</ul>
+    <p class="fine">It then sells at the next opening price and waits {t['cool_off']} trading days before buying back. {_e(nxt_results)}</p></section>
+</div>
+<h3>Your paper account</h3>
+<div class="stats">{acct}</div>"""
+
+
+def _summary(d, sym):
+    a = d["anatomy"]
+    sc = (d.get("events") or {}).get("scorecard") or {}
     q = sc.get("quarters") or []
-    if not q:
-        return "", []
-    rows = "".join(
-        f"<tr><td>{_d(r['quarter'])}</td><td>{_d(r['published'][:10]) if r['published'] else '—'}</td>"
-        f"<td class=n>{_cr(r['revenue'])}</td><td class=n>{_pct(r['revenue_yoy'], 0, True)}</td>"
-        f"<td class=n>{_pct(r['ebitda_margin'])}</td><td class=n>{_cr(r['pat'], 1)}</td>"
-        f"<td class=n>{_pct(r['pat_margin'])}</td><td class=n>{_num(r['eps'])}</td></tr>"
-        for r in reversed(q))
-    series = [{"q": r["quarter"], "v": r["revenue"]} for r in q]
-    ttm_by_q = [(r["published"], r["revenue_ttm"]) for r in q if r["published"] and r["revenue_ttm"]]
+    lines = []
+    if q and q[-1].get("revenue_yoy") is not None:
+        lines.append(f"<b>The business is growing fast.</b> Sales in the quarter to {_d(q[-1]['quarter'])} were "
+                     f"{_words(q[-1]['revenue'])}, {_pct(q[-1]['revenue_yoy'], 0, True)} on a year earlier.")
+    lines.append(f"<b>The share price swings a lot.</b> A typical day moves about {_pct(a['volatility']['atr14_pct_median'], 1)}, "
+                 f"and at its worst it fell {_pct(-a['drawdowns']['max_drawdown'])} from its high.")
+    cr = (d.get("what_happens_when") or {}).get("results", [])
+    n_pat = len({r["condition"] for r in cr})
+    proven = {r["condition"] for r in cr if r["verdict"] == "validated"}
+    if n_pat:
+        lines.append(f"<b>Chart patterns don't predict it.</b> None of the {n_pat} patterns we tested told us more about "
+                     "the next week, month or quarter than picking a random day." if not proven else
+                     f"<b>{len(proven)} of {n_pat} chart patterns held up in testing.</b>")
+    er = (d.get("events") or {}).get("results", [])
+    bad = [r for r in er if r["condition"] in ("results_weak", "profit_decline")
+           and r["verdict"] in ("validated", "consistent, not yet confirmed")]
+    if bad:
+        worst = min(bad, key=lambda r: r["pooled"]["mean"])
+        lines.append(f"<b>Bad results tend to keep hurting.</b> Across similar companies, disappointing results were followed "
+                     f"by a month about {_pct(abs(worst['pooled']['mean']))} weaker than usual. This is "
+                     f"{'proven' if worst['verdict'] == 'validated' else 'promising but not yet proven'}, so the agent uses it only to step aside.")
+    return "".join(f"<li>{x}</li>" for x in lines)
 
-    def ttm_at(ts):
-        known = [v for p, v in ttm_by_q if p <= ts]
-        return known[-1] if known else None
 
+def _company(d, sym):
+    ev = d.get("events") or {}
+    sc = ev.get("scorecard") or {}
+    q = sc.get("quarters") or []
     facts = sc.get("facts") or []
-    book = {}
+    if not q:
+        return "<p class=muted>No results data yet.</p>", []
+    last = q[-1]
+    book = [f for f in facts if f["kind"] in ("order_book", "order_book_organic")]
+    ratings = [f for f in facts if f["kind"] == "rating_action"]
+    ob = book[-1] if book else None
+    ttm = last.get("revenue_ttm")
+    stats = [
+        _stat("Sales, latest quarter", _words(last["revenue"]), f"{_pct(last['revenue_yoy'], 0, True)} on a year earlier" if last["revenue_yoy"] is not None else ""),
+        _stat("Profit, latest quarter", _words(last["pat"]), f"keeps {_pct(last['pat_margin'])} of every rupee of sales"),
+        _stat("Orders in hand", _words(ob["value"]) if ob else "—",
+              f"about {ob['value'] / ttm * 12:.0f} months of sales" if ob and ttm else ""),
+        _stat("Credit rating", RATING_WORD.get(ratings[-1]["value"], ratings[-1]["value"]).capitalize() if ratings else "—",
+              f"by {_e(ratings[-1]['agency'] or 'the agency')} on {_d(ratings[-1]['ts'][:10])}" if ratings else ""),
+    ]
+    qrows = [f"<tr><td>{_d(r['quarter'])}</td><td class=n>{_words(r['revenue'])}</td>"
+             f"<td class=n>{_pct(r['revenue_yoy'], 0, True)}</td><td class=n>{_words(r['pat'])}</td>"
+             f"<td class=n>{_pct(r['pat_margin'], 1)}</td></tr>" for r in reversed(q)]
+    books = {}
     for f in facts:
         if f["kind"] in ("order_book", "order_book_organic", "l1_position", "pipeline"):
-            book.setdefault(f["ts"][:10], {})[f["kind"]] = f
-    book_rows = ""
-    for day in sorted(book, reverse=True):
-        b = book[day]
-        ob = b.get("order_book") or b.get("order_book_organic")
-        ttm = ttm_at(day + " 23:59:59")
-        cover = f"{ob['value'] / ttm * 12:.1f}" if ob and ttm else "—"
-        cells = "".join(f"<td class=n title=\"{_esc(b[k]['quote'][:300])}\">{_cr(b[k]['value'])}</td>" if k in b else "<td class=n>—</td>"
-                        for k in ("order_book", "order_book_organic", "l1_position", "pipeline"))
-        book_rows += f"<tr><td>{_d(day)}</td>{cells}<td class=n>{cover}</td></tr>"
+            books.setdefault(f["ts"][:10], {})[f["kind"]] = f
+    brows = []
+    for day in sorted(books, reverse=True):
+        b = books[day]
+        o = b.get("order_book") or b.get("order_book_organic")
+        brows.append(f"<tr><td>{_d(day)}</td><td class=n>{_words(o['value']) if o else '—'}</td>"
+                     f"<td class=n>{_words(b['l1_position']['value']) if 'l1_position' in b else '—'}</td>"
+                     f"<td class=n>{_words(b['pipeline']['value']) if 'pipeline' in b else '—'}</td></tr>")
 
-    def quoted(kind, fmt):
+    def quotes(kind, fmt):
         items = [f for f in facts if f["kind"] == kind]
-        return "".join(f"<li><b>{_d(f['ts'][:10])}</b>: {fmt(f)} <span class=muted>“{_esc(f['quote'][-220:])}”</span> "
-                       f"<a href=\"{_esc(f['source'])}\">source</a></li>" for f in reversed(items)) or "<li class=muted>None found.</li>"
-
+        return "".join(f"<li><span class=date>{_d(f['ts'][:10])}</span> {fmt(f)}<br><span class=quote>“{_e(f['quote'][-200:])}”</span> "
+                       f"<a href=\"{_e(f['source'])}\">source</a></li>" for f in reversed(items))
     rng = lambda f: f"{f['value'][0]:g}% to {f['value'][1]:g}%"
-    guidance = quoted("revenue_growth_guidance", lambda f: "revenue growth " + rng(f)) + \
-        quoted("margin_guidance", lambda f: "EBITDA margin " + rng(f))
-    ratings = quoted("rating_action", lambda f: f"{_esc((f.get('agency') or 'Agency'))} <b>{_esc(f['value'].replace('_', ' '))}</b>")
-    orders = quoted("order_value", lambda f: f"order worth <b>{_cr(f['value'])}</b>"
-                    + (f" ({f['value'] / ttm_at(f['ts']) * 100:.0f}% of the last 12 months' revenue)" if ttm_at(f['ts']) else ""))
-    html_ = f"""<h2>Business scorecard</h2>
-<p class="sub">From NSE's structured results filings ({_esc(sc.get('basis') or '')} figures, as first published) and from rules that read the company's own presentations, press releases, call transcripts, rating letters and order filings. Hover a figure for the sentence it came from.</p>
-<div class="card"><div class="chart" id="revbars"></div></div>
-<div class="card scroll"><table><tr><th>Quarter ended</th><th>Published</th><th class=n>Revenue</th><th class=n>vs a year ago</th><th class=n>EBITDA margin</th><th class=n>Net profit</th><th class=n>Net margin</th><th class=n>EPS (₹)</th></tr>{rows}</table></div>
-<div class="card scroll"><p><b>Order book and pipeline</b> <span class=muted>(as stated in each filing)</span></p><table><tr><th>Filed</th><th class=n>Order book</th><th class=n>Organic order book</th><th class=n>L1 (won, awaiting order)</th><th class=n>Pipeline</th><th class=n>Months of revenue covered</th></tr>{book_rows}</table>
-<p class="disclaimer">Months covered = order book ÷ the last 12 months' revenue known at that date × 12. From November 2025 the company also reports large "strategic" orders separately from its organic order book. In July 2026 the deck states the pipeline as ₹104,100 Mn while the call transcript says ₹10,401 Mn; the deck figure is shown.</p></div>
-<div class="card"><p><b>Guidance, in management's words</b></p><ul>{guidance}</ul></div>
-<div class="card"><p><b>Credit ratings</b></p><ul>{ratings}</ul><p><b>Order wins</b></p><ul>{orders}</ul></div>"""
-    return html_, series
+    guidance = quotes("revenue_growth_guidance", lambda f: f"Expects sales to grow <b>{rng(f)}</b> a year.") + \
+        quotes("margin_guidance", lambda f: f"Expects operating margin of <b>{rng(f)}</b>.")
+    rating_list = quotes("rating_action", lambda f: f"{_e(f.get('agency') or 'Agency')} <b>{RATING_WORD.get(f['value'], f['value'])}</b> the rating.")
+    orders = quotes("order_value", lambda f: f"Won an order worth <b>{_words(f['value'])}</b>.")
 
-
-def _events_html(ev, sym):
     prof = ev.get("results_profile") or {}
-    tiles = []
-    if prof.get("focus_median_abs_reaction") is not None:
-        ratio = prof["focus_median_abs_reaction"] / prof["focus_ordinary_2day_move"]
-        tiles = [
-            ("Typical results-day move", _pct(prof["focus_median_abs_reaction"]),
-             f"{ratio:.1f}x an ordinary 2-day move ({_pct(prof['focus_ordinary_2day_move'])})"),
-            ("Results reactions that were up", _pct(prof["focus_share_up"], 0),
-             f"{len(prof.get('focus_table', []))} results since listing"),
-            ("Comparison group, typical results move", _pct(prof["pool_median_abs_reaction"]),
-             f"{prof['pool_results']} results across the group"),
-        ]
-    tiles_html = "".join(f'<div class="tile"><div class="tl">{_esc(l)}</div><div class="tv">{v}</div>'
-                         f'<div class="ts">{_esc(s)}</div></div>' for l, v, s in tiles)
-    rows = "".join(
-        f"<tr><td>{_d(r['meeting'])}</td><td>{_esc(r['timing'])}"
-        f"{(' at ' + r['released'][11:16]) if r.get('released') else ''}</td><td>{_d(r['reaction_session'])}</td>"
-        f"<td class=n>{_pct(r['reaction_raw'], 1, True)}</td><td class=n>{_pct(r['reaction_abn'], 1, True)}</td>"
-        f"<td class=n>{_pct(r['next_month_raw'], 1, True)}</td></tr>"
-        for r in reversed(prof.get("focus_table", [])))
-    table = ("<div class='card scroll'><table><tr><th>Results date</th><th>Released</th><th>Reaction session</th>"
-             "<th class=n>Reaction</th><th class=n>vs market</th><th class=n>Next month</th></tr>" + rows + "</table></div>") if rows else ""
-    up = ev.get("upcoming") or []
-    if up:
-        upcoming = "Next scheduled: " + "; ".join(f"{_d(u['date'])}: {_esc(u['purpose'])}" for u in up) + "."
-    else:
-        q2 = [r["meeting"] for r in prof.get("focus_table", []) if r["meeting"][5:7] in ("10", "11")]
-        upcoming = (f"NSE has no upcoming results date for {sym} yet."
-                    + (" Earlier September-quarter results came out on " + ", ".join(_d(x) for x in q2) + "." if q2 else ""))
-    recent = "".join(f"<li>{_d(e['date'])}: {_esc(e['description'])}</li>" for e in (ev.get("focus_recent") or [])[:12]) \
-        or "<li class=muted>No tracked events in the last 120 days.</li>"
-    return {"tiles": tiles_html, "table": table, "upcoming": upcoming, "recent": recent,
-            "tests": ev.get("method", {}).get("tests", "—"), "cut": _pct(ev.get("method", {}).get("reaction_cut"), 0)}
+    rrows = [f"<tr><td>{_d(r['meeting'])}</td><td class='n {'up' if r['reaction_abn'] > 0 else 'down'}'>{_pct(r['reaction_abn'], 1, True)}</td>"
+             f"<td class='n {'up' if (r['next_month_raw'] or 0) > 0 else 'down'}'>{_pct(r['next_month_raw'], 1, True)}</td></tr>"
+             for r in reversed(prof.get("focus_table", []))]
+    typical = prof.get("focus_median_abs_reaction")
+
+    body = f"""
+<p class="intro">What the company reports every quarter, read straight from its filings with the stock exchange.</p>
+<div class="stats">{''.join(stats)}</div>
+<h3>Sales each quarter</h3>
+<div class="chart" id="revbars"></div>
+{_details("Quarter by quarter", _table(["Quarter ended", "#Sales", "#vs a year earlier", "#Profit", "#Profit margin"], qrows))}
+{_details("Orders in hand, over time", "<p class=fine>“Won, awaiting order” means the company is the lowest bidder but the order is not signed yet. The pipeline is business it is bidding for.</p>" + _table(["Reported", "#Orders in hand", "#Won, awaiting order", "#Pipeline"], brows))}
+{_details("What management has promised", f"<ul class='quotes'>{guidance or '<li>None found.</li>'}</ul>")}
+{_details("Credit ratings and big orders", f"<ul class='quotes'>{rating_list or '<li>None found.</li>'}{orders}</ul>")}
+<h3>How the share reacts to results</h3>
+<p class="intro">On results day the share typically moves about <b>{_pct(typical, 1) if typical else '—'}</b> more or less than the market.</p>
+{_details("Every results day", _table(["Results on", "#Move vs the market that day", "#Share price one month later"], rrows))}"""
+    return body, [{"q": r["quarter"], "v": r["revenue"]} for r in q]
 
 
-def _worst(dr):
-    eps = dr.get('episodes_gt_10pct') or []
-    if not eps:
-        return None, None
-    e = min(eps, key=lambda x: x['depth'])
-    return e['peak'], e['trough']
+def _price(d, sym):
+    a = d["anatomy"]
+    ret, vol, dr, fr, rel = a["returns"], a["volatility"], a["drawdowns"], a["forward_returns"], a["relationships"]
+    worst = min(dr.get("episodes_gt_10pct") or [{"peak": None, "trough": None, "depth": dr["max_drawdown"]}], key=lambda e: e["depth"])
+    growth = (1 + ret["cagr"]) ** ret["years"]
+    stats = [
+        _stat("Growth since listing", f"{growth:.1f}×", f"about {_pct(ret['cagr'])} a year over {ret['years']:.1f} years"),
+        _stat("A typical day", _pct(vol["atr14_pct_median"], 1), "up or down, from open to close and overnight"),
+        _stat("Worst fall", _pct(dr["max_drawdown"]), f"{_d(worst['peak'])} to {_d(worst['trough'])}", "down"),
+        _stat("Today vs its high", _pct(dr["current_drawdown"]), "below its highest close so far"),
+    ]
+    best = rel.get("best_fit_index")
+    b = rel.get(best) if best else None
+    market = ""
+    if b:
+        market = (f"<p class='intro'>{sym} moves most like the <b>{_e(INDICES.get(best, best))}</b> index. When that index moves 1%, "
+                  f"{sym} tends to move about <b>{b['beta']:.1f}%</b>: {b['downside_beta']:.1f}% on falling days and "
+                  f"{b['upside_beta']:.1f}% on rising days, so it falls harder than it rises.</p>")
+    frows = [f"<tr><td>{ {'1w': '1 week', '1m': '1 month', '3m': '3 months', '6m': '6 months'}[k]}</td>"
+             f"<td class=n>{_pct(x['p_positive'])}</td><td class=n>{_pct(x['median'], 0, True)}</td>"
+             f"<td class=n>{_pct(x['p10'], 0, True)}</td><td class=n>{_pct(x['p90'], 0, True)}</td></tr>"
+             for k, x in fr.items() if "median" in x]
+    rrows = [f"<tr><td>{_e(INDICES.get(k, k))}</td><td class=n>{x['beta']:.2f}</td><td class=n>{x['downside_beta']:.2f}</td>"
+             f"<td class=n>{x['upside_beta']:.2f}</td><td class=n>{_pct(x['r_squared'])}</td></tr>"
+             for k, x in rel.items() if isinstance(x, dict)]
+    return f"""
+<p class="intro">How the share price has behaved since {sym} listed on {_d(d['history']['first'])}.</p>
+<div class="stats">{''.join(stats)}</div>
+<h3>Share price</h3>
+<p class="fine">Each step up the scale is the same percentage rise, so early and recent moves compare fairly.</p>
+<div class="chart" id="price"></div>
+<h3>How far below its high</h3>
+<p class="fine">0% means a new high. The deeper the shape, the bigger the fall a holder sat through.</p>
+<div class="chart" id="dd"></div>
+<h3>If you bought on any day and waited</h3>
+<p class="intro">Past results, not a forecast: they mostly reflect how much the share has risen since listing.</p>
+{_table(["Waited", "#Ended higher", "#Typical result", "#Bad case (1 in 10)", "#Good case (1 in 10)"], frows)}
+<h3>Compared with the market</h3>
+{market}
+{_details("All market indices", "<p class=fine>“Moves with it” is how many percent the share tends to move for a 1% index move; “explained” is how much of its daily movement the index accounts for.</p>" + _table(["Index", "#Moves with it", "#On falling days", "#On rising days", "#Explained"], rrows))}"""
 
 
-def _badge(v):
-    cls = {"validated": "good", "consistent, not yet confirmed": "cons", "suggestive (not validated)": "warn",
-           "no evidence": "none", "insufficient data": "thin"}[v]
-    icon = {"good": "✓", "cons": "~", "warn": "!", "none": "–", "thin": "?"}[cls]
-    label = {"good": "Validated", "cons": "Consistent, not yet confirmed", "warn": "Suggestive",
-             "none": "No evidence", "thin": "Too few events"}[cls]
-    return f'<span class="badge {cls}"><span aria-hidden="true">{icon}</span> {label}</span>'
+def _agent(ag, sym):
+    if not ag:
+        return "<p class=muted>No agent run yet.</p>", None
+    p, bt = ag["paper"], ag["backtest"]
+    cap = ag["capital"]
+
+    def trade_rows(rows):
+        out = []
+        for t in reversed(rows):
+            tone = "up" if t["pnl"] > 0 else "down"
+            reason = t["exit_reason"].split(" | ")[0] if t["exit_reason"] else "still held"
+            reason = _plain_reason(reason)
+            out.append(f"<tr><td class=dt>{_d(t['entry'])}</td><td class=n>₹{t['entry_price']:,.0f}</td>"
+                       f"<td class=dt>{'still held' if t['status'] == 'OPEN' else _d(t['exit'])}</td>"
+                       f"<td class=n>₹{t['exit_price']:,.0f}</td><td class=n>{t['shares']:,}</td>"
+                       f"<td class='n {tone}'>{_words(t['pnl'])}</td><td class='n {tone}'>{t['pnl_pct']:+.0f}%</td>"
+                       f"<td class=why>{_e(reason)}</td></tr>")
+        return out
+    head = ["Bought", "#At", "Sold", "#At", "#Shares", "#Profit", "#Return", "Why it sold"]
+    paper_trades = trade_rows(p["trades"] + ([p["open"]] if p.get("open") else []))
+    paper_tbl = _table(head, paper_trades) if paper_trades else \
+        f"<p class=muted>No trades yet. The paper account started on {_d(p['start'])}; the first order fills at the next opening price.</p>"
+
+    word = {"enter": "Buy", "exit": "Sell", "hold": "Hold", "wait": "Wait", "add": "Buy more", "trim": "Sell some"}
+    drows = [f"<tr><td>{_d(x['date'])}</td><td><b>{word.get(x['stance'], x['stance'])}</b></td>"
+             f"<td class=why>{_e((x['reason'] or 'Nothing new; keep the current position.').replace(' | ', '. '))}</td></tr>"
+             for x in reversed(p["decisions"])]
+
+    a = next(c for c in bt["configs"] if c["id"] == "A")["metrics"]
+    hold = next(b for b in bt["benchmarks"] if b["id"] == "CONTROL")["metrics"]
+    nifty = next(b for b in bt["benchmarks"] if b["id"] == "NIFTY")["metrics"]
+    became = lambda m: cap * (1 + m["total_return_pct"] / 100)
+    stats = [
+        _stat("The agent", _words(became(a)), f"worst fall {a['max_drawdown_pct']:.0f}%"),
+        _stat(f"Just holding {sym}", _words(became(hold)), f"worst fall {hold['max_drawdown_pct']:.0f}%"),
+        _stat("The Nifty 50 index", _words(became(nifty)), f"worst fall {nifty['max_drawdown_pct']:.0f}%"),
+    ]
+    tried = ""
+    if ag.get("variants"):
+        plain = {"D": "Selling when the price drops sharply (a “stop-loss”)", "E": "Buying extra after a few falling days",
+                 "F": "Buying back sooner, once the price recovers"}
+        tried = "".join(f"<li><b>{plain.get(k, k)}</b>: {'kept' if v['keep'] else 'not adopted'}. It helped on "
+                        f"{v['peers_sharpe_up']} of {v['peers']} similar companies"
+                        f"{' and on ' + sym if v['focus_sharpe_up'] else ', and not on ' + sym}.</li>"
+                        for k, v in ag["variants"]["verdicts"].items())
+    crow = [f"<tr><td><b>{_e(c['id'])}</b></td><td>{_e(c['name'].split('. ', 1)[-1])}</td><td class=n>{_words(became(c['metrics']))}</td>"
+            f"<td class=n>{c['metrics']['max_drawdown_pct']:.0f}%</td><td class=n>{c['metrics']['sharpe']:.2f}</td>"
+            f"<td class=n>{c['metrics'].get('trades') if c['metrics'].get('trades') is not None else '—'}</td></tr>"
+            for c in bt["configs"] + bt["benchmarks"]]
+    html_ = f"""
+<p class="intro">The agent trades one share, {sym}, on paper. It starts with {_inr(cap)} and grows only by its own profit.</p>
+<h3>Paper trades</h3>
+{paper_tbl}
+{_details(f"Every decision ({len(drows)} so far)", _table(["At the close of", "Decision", "Reason"], drows))}
+<h3>How the same rules would have done since {_d(bt['start'])}</h3>
+<p class="intro">Starting with {_inr(cap)}, after all trading charges. The agent ended up about level with simply holding,
+but its <b>worst fall was {abs(a['max_drawdown_pct']):.0f}% instead of {abs(hold['max_drawdown_pct']):.0f}%</b>, because it sold before the
+big drop in early 2025. This replay uses rules found on the same period, so it shows how the rules work, not proof that they will keep working.</p>
+<div class="stats three">{''.join(stats)}</div>
+<div class="legend"><span><i class="k-ink"></i>The agent</span><span><i class="k-bronze"></i>Just holding {sym}</span><span><i class="k-grey"></i>Nifty 50</span></div>
+<div class="chart" id="agentEq"></div>
+<h3>Its trades in the replay</h3>
+{_table(head, trade_rows(bt['trades']))}
+<h3>Other rules we tried</h3>
+<p class="intro">Each idea was written down before testing and had to help on {sym} and on most similar companies.</p>
+<ul class="plain">{tried or '<li>None tested yet.</li>'}</ul>
+{_details("Technical comparison", "<p class=fine>“Risk score” is the Sharpe ratio: return per unit of risk. Higher is better.</p>" + _table(["", "Rules", "#₹10 lakh became", "#Worst fall", "#Risk score", "#Trades"], crow))}"""
+    return html_, {"A": bt["equity"]["A"], "CONTROL": bt["equity"]["CONTROL"], "NIFTY": bt["equity"]["NIFTY"]}
 
 
-LEGEND = ('<div class="legend"><span><i style="background:var(--good)"></i>Validated (✓)</span>'
-          '<span><i style="border:2px solid var(--good);background:transparent"></i>Consistent, not yet confirmed (~)</span>'
-          '<span><i style="background:var(--warning)"></i>Suggestive, failed validation (!)</span>'
-          '<span><i style="background:var(--neutral)"></i>No evidence (–)</span>'
-          '<span><i style="border:2px solid var(--neutral);background:transparent"></i>Too few events (?)</span></div>')
+def _research(d, sym):
+    w = d.get("what_happens_when") or {}
+    ev = d.get("events") or {}
 
-TEMPLATE = """<!doctype html>
+    def rows(results):
+        return [{"desc": PLAIN_LABEL.get(r["condition"], r["description"]), "h": r["horizon"], "verdict": r["verdict"], "plain": PLAIN_VERDICT[r["verdict"]],
+                 "edge": r["pooled"].get("mean"), "ci": r["pooled"].get("ci95"), "n": r["pooled"].get("n")} for r in results]
+
+    def count(results, *verdicts):
+        return len({r["condition"] for r in results if r["verdict"] in verdicts})
+    cr, er = w.get("results", []), ev.get("results", [])
+    stats = [
+        _stat("Chart patterns tested", f"{len({r['condition'] for r in cr})}", f"{count(cr, 'validated')} proven to work"),
+        _stat("Company events tested", f"{len({r['condition'] for r in er})}",
+              f"{count(er, 'validated')} proven, {count(er, 'consistent, not yet confirmed')} promising"),
+    ]
+    toggle = ('<div class="seg" role="group" aria-label="How long after" data-chart="{id}">'
+              '<button data-h="1w" aria-pressed="false">1 week</button><button data-h="1m" aria-pressed="true">1 month</button>'
+              '<button data-h="3m" aria-pressed="false">3 months</button></div>')
+    legend = ('<div class="legend"><span><i class="k-good"></i>Proven</span><span><i class="k-good-o"></i>Promising, not yet proven</span>'
+              '<span><i class="k-warn"></i>A weak hint</span><span><i class="k-grey"></i>No effect</span><span><i class="k-grey-o"></i>Too little data</span></div>')
+    html_ = f"""
+<p class="intro">We asked: after something happens, does {sym} (and similar companies) do better or worse than usual over the
+following weeks? Each dot is the answer; the line through it is how sure we are. If the line crosses the middle, we can't tell it apart from luck.</p>
+<div class="stats three">{''.join(stats)}</div>
+<h3>After company events</h3>
+<p class="fine">Results days, big orders, rating changes, big share deals and changes in the founders' holding.</p>
+{toggle.format(id='events')}{legend}
+<div class="chart" id="events"></div>
+<h3>After chart patterns</h3>
+<p class="fine">Signals people often watch on price charts. None beat picking a random day.</p>
+{toggle.format(id='conds')}{legend}
+<div class="chart" id="conds"></div>"""
+    return html_, rows(cr), rows(er)
+
+
+def _method(d, sym):
+    q = d["data_quality"]
+    yc = q.get("yahoo_crosscheck", {})
+    peers = []
+    pp = os.path.join(os.path.dirname(DOSSIER_PATH[0]), "peers.json")
+    if os.path.exists(pp):
+        with open(pp) as f:
+            for p in json.load(f):
+                if "resid_corr_daily" in p:
+                    c = p["resid_corr_daily"]
+                    peers.append(f"<tr><td>{_e(p['symbol'])}</td><td>{'Closely' if c >= 0.3 else 'Somewhat' if c >= 0.2 else 'Loosely'}</td>"
+                                 f"<td class=n>{c:.2f}</td></tr>")
+    checks = "".join(f"<li>{_e(i['detail'])}</li>" for i in q.get("stock", [])) or "<li>No problems found.</li>"
+    ca = q.get("corporate_actions_applied", [])
+    glossary = [
+        ("Opening price", "The first price of the trading day, at 9:15 am. The agent always trades at this price."),
+        ("Results", "The company's report of sales and profit for a quarter (three months)."),
+        ("Disappointing results", f"On results day the share does at least 3% worse than the market, or profit is lower than a year earlier."),
+        ("Worst fall", "The biggest drop from a high point to a later low, before a new high."),
+        ("Moves with the market", "How much the share tends to move when the market index moves 1%."),
+        ("Orders in hand", "Signed orders the company has yet to deliver: future sales it can count on."),
+        ("Proven / promising", "Proven: held up in both halves of our history and after allowing for luck. Promising: looks real, not enough data yet."),
+        ("Paper trading", "Recording trades as if they were real, with no money involved, to test the rules honestly."),
+        ("Risk score (Sharpe ratio)", "Return earned per unit of risk taken. Higher is better."),
+        ("Nifty 50", "An index of India's 50 largest listed companies, used as a yardstick for the market."),
+    ]
+    return f"""
+<h3>Where the numbers come from</h3>
+<ul class="plain">
+<li>Prices: the National Stock Exchange's official daily files, adjusted for share splits and bonus issues{(' (' + '; '.join(_d(c['ex_date']) for c in ca) + ')') if ca else ''}.</li>
+<li>Checked against Yahoo Finance: they agree on {yc.get('common_days', 0) - len(yc.get('close_mismatch_days', []))} of {yc.get('common_days', 0)} trading days.</li>
+<li>Company results, orders, ratings and management's statements: the company's own filings with the exchange.</li>
+</ul>
+{_details("Data checks", f"<ul class='plain'>{checks}</ul>")}
+<h3>How we judge evidence</h3>
+<ul class="plain">
+<li>Every decision uses only what was known at that day's close, and trades at the next day's opening price.</li>
+<li>Results are compared with similar companies on the same days, so a rising market or a popular sector isn't mistaken for skill.</li>
+<li>Many ideas were tested, so a few will look good by luck. We correct for that, and an idea must also work in both halves of the history.</li>
+<li>We check the method itself: a fake signal planted on purpose is found, and a random one is rejected.</li>
+</ul>
+<h3>Similar companies used for comparison</h3>
+{_table(["Company", "Moves with " + sym, "#Score (0 to 1)"], peers)}
+<h3>Words used in this report</h3>
+<dl class="glossary">{''.join(f'<dt>{_e(k)}</dt><dd>{_e(v)}</dd>' for k, v in glossary)}</dl>"""
+
+
+# ------------------------------------------------------------------ page
+
+DOSSIER_PATH = [""]
+
+
+def render(dossier_path, panel):
+    DOSSIER_PATH[0] = dossier_path
+    with open(dossier_path) as f:
+        d = json.load(f)
+    folder = os.path.dirname(dossier_path)
+    ag = None
+    if os.path.exists(os.path.join(folder, "agent.json")):
+        with open(os.path.join(folder, "agent.json")) as f:
+            ag = json.load(f)
+    sym = d["symbol"]
+    ev = d.get("events") or {}
+
+    close = panel["Close"].dropna()
+    dd = close / close.cummax() - 1
+    company_html, revenue = _company(d, sym)
+    agent_html, equity = _agent(ag, sym)
+    research_html, conds, events = _research(d, sym)
+    data = {"dates": [x.date().isoformat() for x in close.index], "close": [round(float(v), 2) for v in close.values],
+            "dd": [round(float(v), 4) for v in dd.values], "revenue": revenue, "equity": equity,
+            "conds": conds, "events": events}
+
+    tabs = [("today", "Today"), ("company", "The company"), ("shareprice", "The share price"), ("agent", "The agent's record"),
+            ("research", "Research"), ("method", "How it works")]
+    panels = {
+        "today": _today(ag, sym, ev) + f"<h3>{sym} in four sentences</h3><ul class='plain summary'>{_summary(d, sym)}</ul>",
+        "company": company_html, "shareprice": _price(d, sym), "agent": agent_html, "research": research_html,
+        "method": _method(d, sym),
+    }
+    nav = "".join(f'<button role="tab" data-tab="{t}" aria-selected="false">{_e(n)}</button>' for t, n in tabs)
+    body = "".join(f'<section class="panel" data-tab="{t}" role="tabpanel" hidden>{panels[t]}</section>' for t, _ in tabs)
+    page = (PAGE.replace("__SYM__", _e(sym))
+            .replace("__ASOF__", _d(d["history"]["last"]))
+            .replace("__NAV__", nav).replace("__BODY__", body)
+            .replace("__CSS__", CSS).replace("__JS__", JS.replace("__DATA__", json.dumps(data))))
+    out = os.path.join(folder, "report.html")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(page)
+    print(f"Wrote {out}")
+    return out
+
+
+PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{sym} Stock Dossier</title>
-<script>try {{ const t = localStorage.getItem('dossier-theme'); if (t) document.documentElement.dataset.theme = t; }} catch (e) {{}}</script>
-<style>
-:root {{
+<title>__SYM__ Dossier</title>
+<script>try { const t = localStorage.getItem('dossier-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>__CSS__</style></head>
+<body>
+<header class="masthead">
+  <div class="brand"><span class="mark">__SYM__</span><span class="sub">Stock dossier · data to __ASOF__</span></div>
+  <button id="theme" class="ghost" type="button">Dark</button>
+</header>
+<nav class="tabbar" role="tablist" aria-label="Sections">__NAV__</nav>
+<main>__BODY__</main>
+<footer class="foot">Research for paper trading only. Not investment advice. Past behaviour does not guarantee future returns.</footer>
+<div class="tip" id="tip" role="tooltip"></div>
+<script>__JS__</script>
+</body></html>"""
+
+CSS = r"""
+:root {
   color-scheme: light;
-  --surface-0:#f6f6f4; --surface-1:#fcfcfb; --line:#e4e3df; --grid:#ecebe7;
-  --text-primary:#0b0b0b; --text-secondary:#52514e; --text-muted:#7a7975;
-  --series-1:#2a78d6; --series-dd:#e34948; --wash-dd:rgba(227,73,72,.10); --wash-1:rgba(42,120,214,.10);
-  --series-2:#eb6834; --series-3:#1baf7a;
-  --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b; --neutral:#a3a29c;
-}}
-@media (prefers-color-scheme: dark) {{
-  :root:where(:not([data-theme="light"])) {{
+  --bg:#f6f4ef; --surface:#fbfaf7; --ink:#1a1916; --ink-2:#55524b; --ink-3:#8b877e; --rule:#e5e1d8; --rule-2:#eeebe4;
+  --bronze:#9a7a4c; --grey:#a8a49a; --good:#0f8a4a; --down:#b3382f; --warning:#c98a12; --wash:rgba(179,56,47,.08);
+  --font:"Modern Era","Manrope",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
-    --surface-0:#121211; --surface-1:#1a1a19; --line:#2c2c2a; --grid:#262624;
-    --text-primary:#ffffff; --text-secondary:#c3c2b7; --text-muted:#8f8e86;
-    --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70; --series-dd:#e66767; --wash-dd:rgba(230,103,103,.12); --wash-1:rgba(57,135,229,.12);
-    --neutral:#6f6e68;
-  }}
-}}
-:root[data-theme="dark"] {{
+    --bg:#0e0e0d; --surface:#151513; --ink:#f1eee6; --ink-2:#bdb8ad; --ink-3:#86817a; --rule:#2a2925; --rule-2:#201f1c;
+    --bronze:#c9a870; --grey:#6d6a63; --good:#3fbf7a; --down:#e0736a; --warning:#e2a93b; --wash:rgba(224,115,106,.10);
+  }
+}
+:root[data-theme="dark"] {
   color-scheme: dark;
-  --surface-0:#121211; --surface-1:#1a1a19; --line:#2c2c2a; --grid:#262624;
-  --text-primary:#ffffff; --text-secondary:#c3c2b7; --text-muted:#8f8e86;
-  --series-1:#3987e5; --series-dd:#e66767; --wash-dd:rgba(230,103,103,.12); --wash-1:rgba(57,135,229,.12);
-  --neutral:#6f6e68;
-}}
-* {{ box-sizing:border-box; }}
-body {{ margin:0; background:var(--surface-0); color:var(--text-primary);
-  font:15px/1.55 "Modern Era", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }}
-main {{ max-width:1080px; margin:0 auto; padding:32px 16px 64px; }}
-h1 {{ font-size:28px; margin:0 0 4px; font-weight:650; letter-spacing:-.01em; }}
-h2 {{ font-size:19px; margin:40px 0 6px; font-weight:620; }}
-.sub {{ color:var(--text-secondary); margin:0 0 4px; }}
-.muted {{ color:var(--text-muted); }}
-.card {{ background:var(--surface-1); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin-top:12px; }}
-.headline {{ border-left:4px solid var(--series-1); }}
-.headline p {{ margin:.3em 0; }}
-.disclaimer {{ font-size:13px; color:var(--text-secondary); margin-top:10px; }}
-.tiles {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; margin-top:16px; }}
-.tile {{ background:var(--surface-1); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }}
-.tl {{ font-size:13px; color:var(--text-secondary); }}
-.tv {{ font-size:24px; font-weight:620; margin:2px 0; }}
-.ts {{ font-size:12.5px; color:var(--text-muted); }}
-.scroll {{ overflow-x:auto; }}
-table {{ border-collapse:collapse; width:100%; font-size:14px; }}
-th, td {{ text-align:left; padding:8px 10px; border-bottom:1px solid var(--grid); vertical-align:top; }}
-th {{ font-weight:600; color:var(--text-secondary); font-size:13px; white-space:nowrap; }}
-td.n, th.n {{ text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }}
-tr.hl td {{ background:var(--wash-1); }}
-.badge {{ display:inline-flex; gap:4px; align-items:center; font-size:12.5px; padding:1px 8px; border-radius:999px;
-  border:1px solid var(--line); color:var(--text-primary); white-space:nowrap; }}
-.badge.good span {{ color:var(--good); font-weight:700; }} .badge.warn span {{ color:var(--warning); font-weight:700; }}
-.badge.none span {{ color:var(--text-muted); }} .badge.thin span {{ color:var(--text-muted); }}
-.badge.good {{ border-color:var(--good); }} .badge.cons {{ border-color:var(--good); border-style:dashed; }} .badge.cons span {{ color:var(--good); font-weight:700; }} .badge.warn {{ border-color:var(--warning); }}
-.chart {{ position:relative; width:100%; }}
-.chart svg {{ display:block; width:100%; }}
-.axis text {{ fill:var(--text-muted); font-size:11.5px; font-variant-numeric:tabular-nums; }}
-.gridline {{ stroke:var(--grid); stroke-width:1; }}
-.tip {{ position:absolute; pointer-events:none; background:var(--surface-1); border:1px solid var(--line);
-  border-radius:8px; padding:8px 10px; font-size:13px; box-shadow:0 4px 16px rgba(0,0,0,.12); display:none;
-  max-width:320px; z-index:5; }}
-.tip b {{ font-weight:620; }}
-.tabs {{ display:flex; gap:6px; margin:12px 0 4px; flex-wrap:wrap; }}
-.tabs button {{ font:inherit; font-size:13.5px; padding:5px 12px; border-radius:999px; border:1px solid var(--line);
-  background:var(--surface-1); color:var(--text-primary); cursor:pointer; }}
-.tabs button[aria-pressed="true"] {{ background:var(--text-primary); color:var(--surface-1); border-color:var(--text-primary); }}
-.legend {{ display:flex; gap:14px; flex-wrap:wrap; font-size:13px; color:var(--text-secondary); margin:6px 0; }}
-.legend i {{ display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:5px; vertical-align:-1px; }}
-details summary {{ cursor:pointer; color:var(--text-secondary); margin-top:10px; }}
-ul {{ padding-left:20px; }} li {{ margin:4px 0; }}
-code {{ font-size:13px; }}
-.top {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; }}
-.themebtn {{ font:inherit; font-size:13.5px; padding:6px 14px; border-radius:999px; border:1px solid var(--line);
-  background:var(--surface-1); color:var(--text-primary); cursor:pointer; }}
-.tabbar {{ position:sticky; top:0; z-index:4; display:flex; gap:4px; overflow-x:auto; margin:18px -16px 8px; padding:10px 16px;
-  background:var(--surface-0); border-bottom:1px solid var(--line); scrollbar-width:none; }}
-.tabbar button {{ font:inherit; font-size:14px; white-space:nowrap; padding:7px 14px; border-radius:8px; border:0;
-  background:transparent; color:var(--text-secondary); cursor:pointer; }}
-.tabbar button:hover {{ background:var(--surface-1); color:var(--text-primary); }}
-.tabbar button[aria-selected="true"] {{ background:var(--text-primary); color:var(--surface-0); }}
-.panel > h2:first-child, .panel > .card:first-child {{ margin-top:12px; }}
-td.pos {{ color:var(--good); }} td.neg {{ color:var(--critical); }}
-td.why {{ font-size:13px; color:var(--text-secondary); min-width:260px; }}
-</style></head>
-<body><main>
-<header class="top"><div><h1>{sym} Stock Dossier</h1>
-<p class="sub">Data to {as_of} · {bars} sessions since {first} · built {generated}</p></div>
-<button id="theme" class="themebtn" type="button" aria-label="Switch theme">Dark mode</button></header>
+  --bg:#0e0e0d; --surface:#151513; --ink:#f1eee6; --ink-2:#bdb8ad; --ink-3:#86817a; --rule:#2a2925; --rule-2:#201f1c;
+  --bronze:#c9a870; --grey:#6d6a63; --good:#3fbf7a; --down:#e0736a; --warning:#e2a93b; --wash:rgba(224,115,106,.10);
+}
+* { box-sizing:border-box; }
+html { -webkit-text-size-adjust:100%; }
+body { margin:0; background:var(--bg); color:var(--ink); font-family:var(--font); font-weight:400; font-size:16px;
+  line-height:1.65; letter-spacing:.005em; -webkit-font-smoothing:antialiased; }
+a { color:var(--ink-2); text-underline-offset:3px; }
+code { font-size:.9em; background:var(--rule-2); padding:1px 6px; border-radius:4px; }
+.masthead, .tabbar, main, .foot { max-width:1040px; margin:0 auto; padding-left:24px; padding-right:24px; }
+.masthead { display:flex; justify-content:space-between; align-items:center; gap:16px; padding-top:40px; padding-bottom:8px; }
+.brand { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.mark { font-size:13px; font-weight:600; letter-spacing:.32em; text-transform:uppercase; }
+.brand .sub { font-size:13px; color:var(--ink-3); letter-spacing:.04em; }
+.ghost { font:inherit; font-size:12px; letter-spacing:.18em; text-transform:uppercase; padding:9px 16px; border-radius:999px;
+  border:1px solid var(--rule); background:transparent; color:var(--ink); cursor:pointer; flex-shrink:0; }
+.ghost:hover { border-color:var(--ink-3); }
+.tabbar { position:sticky; top:0; z-index:5; display:flex; gap:28px; overflow-x:auto; background:var(--bg);
+  border-bottom:1px solid var(--rule); scrollbar-width:none; padding-top:14px; }
+.tabbar::-webkit-scrollbar { display:none; }
+.tabbar button { font:inherit; font-size:13px; letter-spacing:.12em; text-transform:uppercase; white-space:nowrap;
+  padding:12px 0 14px; border:0; border-bottom:1px solid transparent; margin-bottom:-1px; background:none;
+  color:var(--ink-3); cursor:pointer; }
+.tabbar button:hover { color:var(--ink); }
+.tabbar button[aria-selected="true"] { color:var(--ink); border-bottom-color:var(--ink); }
+main { padding-top:8px; padding-bottom:40px; }
+.panel { animation:fade .35s ease; }
+@keyframes fade { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+h3 { font-size:12px; font-weight:600; letter-spacing:.22em; text-transform:uppercase; color:var(--ink-2);
+  margin:64px 0 18px; padding-top:22px; border-top:1px solid var(--rule); }
+.intro { font-size:17px; font-weight:300; color:var(--ink-2); max-width:760px; margin:24px 0 8px; }
+.intro b { font-weight:500; color:var(--ink); }
+.fine { font-size:13px; color:var(--ink-3); max-width:760px; margin:6px 0 14px; }
+.muted { color:var(--ink-3); }
+.hero { padding:56px 0 36px; }
+.eyebrow { font-size:12px; letter-spacing:.24em; text-transform:uppercase; color:var(--bronze); margin:0 0 18px; }
+.statement { font-size:clamp(40px, 7vw, 76px); font-weight:300; letter-spacing:-.025em; line-height:1.04; margin:0;
+  overflow-wrap:anywhere; }
+.lede { font-size:clamp(17px, 2vw, 20px); font-weight:300; color:var(--ink-2); max-width:720px; margin:22px 0 0; }
+.lede b { font-weight:500; color:var(--ink); }
+.hero .fine { margin-top:18px; }
+.two { display:grid; grid-template-columns:1fr 1fr; gap:48px; }
+.two h3 { margin-top:24px; }
+ul.plain { list-style:none; padding:0; margin:0; }
+ul.plain li { padding:12px 0; border-bottom:1px solid var(--rule-2); color:var(--ink-2); font-weight:300; }
+ul.plain li:last-child { border-bottom:0; }
+ul.plain li b { font-weight:500; color:var(--ink); }
+ul.summary li { font-size:17px; }
+.stats { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); border-top:1px solid var(--rule); border-bottom:1px solid var(--rule); margin:22px 0 8px; }
+.stats.three { grid-template-columns:repeat(3, minmax(0, 1fr)); }
+.stat { padding:22px 20px 22px 0; min-width:0; }
+.stat + .stat { padding-left:20px; border-left:1px solid var(--rule); }
+.label { font-size:11px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink-3); }
+.value { font-size:clamp(26px, 3.2vw, 36px); font-weight:300; letter-spacing:-.015em; margin:10px 0 4px; line-height:1.1; overflow-wrap:anywhere; }
+.value.up { color:var(--good); } .value.down { color:var(--down); }
+.note { font-size:13px; color:var(--ink-3); overflow-wrap:anywhere; }
+.scroll { overflow-x:auto; margin:10px 0; }
+table { border-collapse:collapse; width:100%; font-size:14px; font-variant-numeric:tabular-nums; }
+th { font-size:11px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-3); text-align:left;
+  padding:10px 16px 10px 0; border-bottom:1px solid var(--rule); white-space:nowrap; }
+td { padding:12px 16px 12px 0; border-bottom:1px solid var(--rule-2); vertical-align:top; color:var(--ink-2); }
+td b { color:var(--ink); font-weight:500; }
+th.n, td.n { text-align:right; white-space:nowrap; }
+td.up { color:var(--good); } td.down { color:var(--down); }
+td.why { min-width:240px; font-size:13px; color:var(--ink-3); }
+td.dt, tbody td:first-child { white-space:nowrap; }
+details.more { border-bottom:1px solid var(--rule-2); margin:6px 0; }
+details.more summary { cursor:pointer; list-style:none; padding:14px 0; font-size:13px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-2); }
+details.more summary::-webkit-details-marker { display:none; }
+details.more summary::before { content:"+"; display:inline-block; width:22px; color:var(--bronze); }
+details.more[open] summary::before { content:"−"; }
+.more-body { padding:0 0 18px; }
+ul.quotes { list-style:none; padding:0; margin:0; }
+ul.quotes li { padding:12px 0; border-bottom:1px solid var(--rule-2); color:var(--ink-2); font-size:14px; }
+.date { display:inline-block; min-width:150px; color:var(--ink-3); font-size:13px; }
+.quote { color:var(--ink-3); font-size:13px; font-style:italic; }
+.chart { position:relative; width:100%; margin:8px 0 6px; min-height:40px; }
+.chart svg { display:block; width:100%; overflow:visible; }
+.axis text { fill:var(--ink-3); font-size:11px; font-family:var(--font); font-variant-numeric:tabular-nums; }
+.grid { stroke:var(--rule-2); stroke-width:1; }
+.legend { display:flex; flex-wrap:wrap; gap:8px 22px; font-size:12px; color:var(--ink-2); margin:14px 0 4px; }
+.legend i { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:8px; vertical-align:-1px; }
+.k-ink { background:var(--ink); } .k-bronze { background:var(--bronze); } .k-grey { background:var(--grey); }
+.k-good { background:var(--good); } .k-warn { background:var(--warning); }
+.k-good-o { border:1.5px solid var(--good); } .k-grey-o { border:1.5px solid var(--grey); }
+.seg { display:inline-flex; border:1px solid var(--rule); border-radius:999px; padding:3px; margin:10px 0 0; }
+.seg button { font:inherit; font-size:12px; letter-spacing:.1em; text-transform:uppercase; padding:6px 14px; border-radius:999px;
+  border:0; background:none; color:var(--ink-3); cursor:pointer; }
+.seg button[aria-pressed="true"] { background:var(--ink); color:var(--bg); }
+dl.glossary { display:grid; grid-template-columns:minmax(160px, 240px) 1fr; gap:0; margin:0; }
+dl.glossary dt, dl.glossary dd { padding:12px 0; border-bottom:1px solid var(--rule-2); margin:0; }
+dl.glossary dt { font-weight:500; padding-right:20px; } dl.glossary dd { color:var(--ink-2); font-weight:300; }
+.foot { font-size:12px; color:var(--ink-3); letter-spacing:.04em; padding-top:28px; padding-bottom:48px; border-top:1px solid var(--rule); }
+.tip { position:fixed; pointer-events:none; z-index:20; display:none; max-width:300px; padding:10px 12px; font-size:13px; line-height:1.5;
+  background:var(--surface); color:var(--ink); border:1px solid var(--rule); border-radius:8px; box-shadow:0 8px 28px rgba(0,0,0,.14); }
+.tip b { font-weight:600; }
+@media (max-width: 760px) {
+  .masthead, .tabbar, main, .foot { padding-left:16px; padding-right:16px; }
+  .two { grid-template-columns:1fr; gap:0; }
+  .stats, .stats.three { grid-template-columns:1fr 1fr; }
+  .stat:nth-child(odd) { padding-left:0; border-left:0; }
+  .stat:nth-child(n+3) { border-top:1px solid var(--rule); }
+  .tabbar { gap:20px; -webkit-mask-image:linear-gradient(90deg, #000 85%, transparent); mask-image:linear-gradient(90deg, #000 85%, transparent); padding-right:40px; }
+  dl.glossary { grid-template-columns:1fr; } dl.glossary dt { border-bottom:0; padding-bottom:0; }
+}
+"""
 
-<nav class="tabbar" role="tablist" aria-label="Report sections">
-<button role="tab" data-tab="overview" aria-selected="false">Overview</button><button role="tab" data-tab="agent" aria-selected="false">Trading agent</button><button role="tab" data-tab="risk" aria-selected="false">Price &amp; risk</button><button role="tab" data-tab="business" aria-selected="false">Business</button><button role="tab" data-tab="when" aria-selected="false">What happens when</button><button role="tab" data-tab="evidence" aria-selected="false">Evidence &amp; data</button>
-</nav>
-<section class="panel" id="tab-overview" role="tabpanel" data-tab="overview" hidden>
-<div class="card headline">{headline}
-<p class="disclaimer">Research for paper trading only. This is not investment advice, and past behaviour does not guarantee future returns.</p></div>
-
-<div class="tiles">{tiles}</div>
-<h2>What is true right now</h2>
-<p class="sub">Tracked conditions active at the latest close, with what the evidence says for each holding period.</p>
-<div class="card scroll"><table>
-<tr><th>Condition</th><th>Since</th><th class=n>Sessions</th><th>1 week</th><th>1 month</th><th>3 months</th></tr>
-{now_rows}</table></div>
-</section>
-<section class="panel" id="tab-agent" role="tabpanel" data-tab="agent" hidden>
-{agent}
-</section>
-<section class="panel" id="tab-risk" role="tabpanel" data-tab="risk" hidden>
-<h2>Price since listing</h2>
-<p class="sub">NSE closing price, adjusted for splits and bonuses. Log scale, so equal heights mean equal percentage moves.</p>
-<div class="card"><div class="chart" id="price"></div></div>
-<h2>Distance below its previous peak</h2>
-<p class="sub">How far the price sat below its highest close so far. The worst fall took {worst_dd} off its value, from {worst_peak} to {worst_trough}.</p>
-<div class="card"><div class="chart" id="dd"></div></div>
-<h2>What has happened after a random day</h2>
-<p class="sub">The baseline for every other number. Buying on any day and holding for a fixed period gave the returns below. The mean mostly reflects the stock's rise since listing; it is not a forecast.</p>
-<div class="card scroll"><table>
-<tr><th>Hold for</th><th class=n>Independent periods</th><th class=n>Average</th><th class=n>95% range of the average</th><th class=n>Ended up</th><th class=n>Bad case (10%)</th><th class=n>Good case (90%)</th><th class=n>Typical dip along the way</th></tr>
-{fwd_rows}</table></div>
-<h2>How it moves with the market</h2>
-<p class="sub">Beta is how much NETWEB tends to move for a 1% index move. The highlighted row is the index that explains the most of its moves ({best_fit}).</p>
-<div class="card scroll"><table>
-<tr><th>Index</th><th class=n>Beta</th><th class=n>On down days</th><th class=n>On up days</th><th class=n>Moves explained</th><th class=n>Sessions</th></tr>
-{rel_rows}</table></div>
-</section>
-<section class="panel" id="tab-business" role="tabpanel" data-tab="business" hidden>
-{scorecard}
-<h2>Around results</h2>
-<p class="sub">Each result is dated by the first session the market could trade on it: a release after 3:30pm reacts the next day. The reaction runs from the close before the release to the close of that session.</p>
-<div class="tiles">{ev_tiles}</div>
-<p class="sub" style="margin-top:12px">{ev_upcoming}</p>
-{ev_table}
-</section>
-<section class="panel" id="tab-when" role="tabpanel" data-tab="when" hidden>
-<h2>What happens when…</h2>
-<p class="sub">Each dot is the average extra return after a condition first appears, compared with a random peer bought the same day. The bar shows the 95% range. Anything crossing zero is indistinguishable from nothing.</p>
-<div class="tabs" role="group" aria-label="Holding period" data-chart="conds">
-<button data-h="1w" aria-pressed="false">1 week</button><button data-h="1m" aria-pressed="true">1 month</button><button data-h="3m" aria-pressed="false">3 months</button></div>
-{legend}
-<div class="card"><div class="chart" id="conds"></div></div>
-<details><summary>Show the full table</summary><div class="card scroll"><table id="condstable"></table></div></details>
-<h2>What happens after events</h2>
-<p class="sub">The same test as above, for company events across the comparison group: results split by first reaction ({ev_cut} either way), NSE filing categories, bulk and block deals, and promoter stake changes. The trade enters at the open after the event is public. {ev_tests} tests.</p>
-<div class="tabs" role="group" aria-label="Holding period" data-chart="events">
-<button data-h="1w" aria-pressed="false">1 week</button><button data-h="1m" aria-pressed="true">1 month</button><button data-h="3m" aria-pressed="false">3 months</button></div>
-{legend}
-<div class="card"><div class="chart" id="events"></div></div>
-<details><summary>Show the full table</summary><div class="card scroll"><table id="eventstable"></table></div></details>
-<div class="card"><p><b>Recent {sym} events</b></p><ul>{ev_recent}</ul>
-<p class="disclaimer">Filing categories come from NSE; their content (for example a rating upgrade vs a downgrade, or the size of an order) is in the PDF and is not read yet. Bulk deals exclude clients who bought and sold the same stock that day (high-frequency and prop desks).</p></div>
-</section>
-<section class="panel" id="tab-evidence" role="tabpanel" data-tab="evidence" hidden>
-<h2>Comparison group</h2>
-<p class="sub">How closely each stock moves with NETWEB once the whole market's move is removed (0 = unrelated, 1 = identical).</p>
-<div class="card scroll"><table>
-<tr><th>Stock</th><th>Role</th><th class=n>Co-movement</th><th class=n>95% range</th><th class=n>Sessions</th><th class=n>Volatility</th></tr>
-{peer_rows}</table></div>
-<h2>Data quality</h2>
-<div class="card"><p><b>Source:</b> NSE official daily files. <b>Splits and bonuses:</b> {ca_line}</p>
-<p><b>Yahoo cross-check:</b> {yahoo_line}</p><ul>{issue_rows}</ul></div>
-<h2>How the evidence is judged</h2>
-<div class="card"><ul>
-<li>Signals use only information available at that day's close; the trade is entered at the <b>next session's open</b>.</li>
-<li>An event is the first day a condition appears after at least 5 sessions without it, so one long episode counts once.</li>
-<li>Returns are measured against {abn_vs}, then against a random comparison stock bought the same day, so the whole theme's rise is not mistaken for an edge. Market-wide conditions (VIX, index trend) are compared with the stock's own average instead.</li>
-<li>Evidence is pooled across {pool}. Uncertainty is grouped by calendar week because these stocks move together.</li>
-<li>{tests} tests are corrected for multiple testing (Benjamini-Hochberg). <b>Validated</b> means significant after that correction, significant in data before {val_start}, <i>and</i> pointing the same way in the data after it.</li>
-<li>NETWEB's own estimate is pulled toward the group's unless NETWEB clearly behaves differently (random-effects shrinkage).</li>
-<li><b>Consistent, not yet confirmed</b> means it passes the multiple-testing correction and points the same way in both halves, but only one half is significant on its own. This tier was added on 27 September 2026 after the first event study, so treat it as provisional.</li>
-<li>The method is tested: a deliberately planted signal is found and validated, and a random one is rejected.</li>
-<li>Returns are before costs; allow roughly 0.3% for a round trip.</li>
-</ul></div>
-</section>
-</main>
-<div class="tip" id="tip"></div>
-<script>
-const D = {data};
+JS = r"""
+const D = __DATA__;
 const tip = document.getElementById('tip');
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-const fmtDate = s => {{ const [y,m,d] = s.split('-').map(Number); return d + ' ' + MONTHS[m-1] + ' ' + y; }};
-const pct = (x, s) => x == null ? '—' : ((s && x > 0 ? '+' : '') + (x*100).toFixed(1) + '%');
+const fmtDate = s => { const [y, m, d] = s.split('-').map(Number); return d + ' ' + MONTHS[m - 1] + ' ' + y; };
+const pct = (x, sign) => x == null ? '—' : ((sign && x > 0 ? '+' : '') + (x * 100).toFixed(1) + '%');
+const lakh = v => v >= 1e7 ? '₹' + (v / 1e7).toFixed(2) + ' crore' : '₹' + (v / 1e5).toFixed(1) + ' lakh';
 const NS = 'http://www.w3.org/2000/svg';
-const el = (t, a, p) => {{ const e = document.createElementNS(NS, t); for (const k in a) e.setAttribute(k, a[k]); if (p) p.appendChild(e); return e; }};
-function showTip(host, x, y, html) {{
+const el = (t, a, p) => { const e = document.createElementNS(NS, t); for (const k in a) e.setAttribute(k, a[k]); if (p) p.appendChild(e); return e; };
+
+// Tooltip: fixed-position and clamped inside the window so it never runs off-screen or covers the pointer.
+function showTip(ev, html) {
   tip.innerHTML = html; tip.style.display = 'block';
-  const r = host.getBoundingClientRect(), tw = tip.offsetWidth;
-  let left = r.left + window.scrollX + x + 14; if (left + tw > window.scrollX + document.documentElement.clientWidth - 8) left = r.left + window.scrollX + x - tw - 14;
-  tip.style.left = left + 'px'; tip.style.top = (r.top + window.scrollY + y - 10) + 'px';
-}}
-const hideTip = () => tip.style.display = 'none';
+  const pad = 12, w = tip.offsetWidth, h = tip.offsetHeight, vw = innerWidth, vh = innerHeight;
+  let x = ev.clientX + 16, y = ev.clientY + 16;
+  if (x + w + pad > vw) x = ev.clientX - w - 16;
+  if (y + h + pad > vh) y = ev.clientY - h - 16;
+  tip.style.left = Math.max(pad, x) + 'px'; tip.style.top = Math.max(pad, y) + 'px';
+}
+const hideTip = () => { tip.style.display = 'none'; };
 
-function lineChart(id, ys, opts) {{
-  const host = document.getElementById(id); host.innerHTML = '';
-  if (!host.clientWidth) return;
-  const W = host.clientWidth, H = opts.h, m = {{l:56, r:14, t:10, b:26}};
-  const svg = el('svg', {{viewBox:`0 0 ${{W}} ${{H}}`, height:H, role:'img', 'aria-label':opts.label}}, host);
+// Fit text into a width, adding an ellipsis; the full text stays available in the tooltip.
+function fitText(node, text, width) {
+  node.textContent = text;
+  if (node.getComputedTextLength() <= width) return;
+  let lo = 0, hi = text.length;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; node.textContent = text.slice(0, mid) + '…';
+    if (node.getComputedTextLength() <= width) lo = mid; else hi = mid - 1; }
+  node.textContent = text.slice(0, lo) + '…';
+}
+
+// X-axis year labels that never collide: each is placed only if it clears the previous one.
+function yearLabels(g, dates, xs, y, first) {
+  let lastYear = null, lastEnd = -1e9;
+  dates.forEach((s, i) => {
+    const yr = s.slice(0, 4); if (yr === lastYear) return; lastYear = yr;
+    if (i === 0 && !first) return;
+    const t = el('text', {x: xs(i), y, 'text-anchor': i === 0 ? 'start' : 'middle'}, g);
+    t.textContent = i === 0 ? fmtDate(s) : yr;
+    const w = t.getComputedTextLength(), left = i === 0 ? xs(i) : xs(i) - w / 2;
+    if (left < lastEnd + 14) { t.remove(); return; }
+    lastEnd = left + w;
+  });
+}
+
+function lineChart(id, ys, o) {
+  const host = document.getElementById(id); if (!host) return; host.innerHTML = '';
+  const W = host.clientWidth; if (!W) return;
+  const H = o.h, m = {l: 60, r: 12, t: 12, b: 30};
+  const svg = el('svg', {viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': o.label}, host);
   const n = ys.length, xs = i => m.l + (W - m.l - m.r) * i / (n - 1);
-  const tv = opts.log ? ys.map(Math.log) : ys;
-  let lo = Math.min(...tv), hi = Math.max(...tv); if (opts.zeroTop) hi = 0;
-  const yv = v => m.t + (H - m.t - m.b) * (1 - ((opts.log ? Math.log(v) : v) - lo) / (hi - lo || 1));
-  const g = el('g', {{class:'axis'}}, svg);
-  opts.ticks(lo, hi).forEach(t => {{ const y = yv(t); el('line', {{x1:m.l, x2:W-m.r, y1:y, y2:y, class:'gridline'}}, g);
-    el('text', {{x:m.l-8, y:y+4, 'text-anchor':'end'}}, g).textContent = opts.fmt(t); }});
-  // Year ticks at each year's first session; skip any that would crowd the previous label.
-  const dates = D.series.dates; let lastYear = null, lastEnd = -1e9;
-  dates.forEach((s, i) => {{ const yr = s.slice(0,4);
-    if (yr === lastYear) return;
-    lastYear = yr;
-    const text = i === 0 ? fmtDate(s) : yr, x0 = xs(i), w = text.length * 6.5;
-    const left = i === 0 ? x0 : x0 - w / 2;
-    if (left < lastEnd + 12) return;
-    el('text', {{x:x0, y:H-6, 'text-anchor': i === 0 ? 'start' : 'middle'}}, g).textContent = text;
-    lastEnd = left + w; }});
+  const tv = o.log ? ys.map(Math.log) : ys;
+  let lo = Math.min(...tv), hi = o.zeroTop ? 0 : Math.max(...tv);
+  const yv = v => m.t + (H - m.t - m.b) * (1 - ((o.log ? Math.log(v) : v) - lo) / (hi - lo || 1));
+  const g = el('g', {class: 'axis'}, svg);
+  let lastY = -1e9;
+  o.ticks(lo, hi).forEach(t => { const y = yv(t); if (Math.abs(y - lastY) < 16) return; lastY = y;
+    el('line', {x1: m.l, x2: W - m.r, y1: y, y2: y, class: 'grid'}, g);
+    el('text', {x: m.l - 10, y: y + 4, 'text-anchor': 'end'}, g).textContent = o.fmt(t); });
+  yearLabels(g, D.dates, xs, H - 8, true);
   const path = ys.map((v, i) => (i ? 'L' : 'M') + xs(i).toFixed(1) + ' ' + yv(v).toFixed(1)).join('');
-  if (opts.area) el('path', {{d: path + `L${{xs(n-1)}} ${{yv(0)}}L${{xs(0)}} ${{yv(0)}}Z`, fill:css(opts.wash), stroke:'none'}}, svg);
-  el('path', {{d:path, fill:'none', stroke:css(opts.color), 'stroke-width':2, 'stroke-linejoin':'round', 'stroke-linecap':'round'}}, svg);
-  const endx = xs(n-1), endy = yv(ys[n-1]);
-  el('circle', {{cx:endx, cy:endy, r:4.5, fill:css(opts.color), stroke:css('--surface-1'), 'stroke-width':2}}, svg);
-  const cross = el('line', {{y1:m.t, y2:H-m.b, stroke:css('--text-muted'), 'stroke-width':1, visibility:'hidden'}}, svg);
-  const dot = el('circle', {{r:4.5, fill:css(opts.color), stroke:css('--surface-1'), 'stroke-width':2, visibility:'hidden'}}, svg);
-  const hit = el('rect', {{x:m.l, y:0, width:W-m.l-m.r, height:H, fill:'transparent'}}, svg);
-  hit.addEventListener('mousemove', e => {{
+  if (o.area) el('path', {d: path + `L${xs(n - 1)} ${yv(0)}L${xs(0)} ${yv(0)}Z`, fill: css('--wash'), stroke: 'none'}, svg);
+  el('path', {d: path, fill: 'none', stroke: css(o.color), 'stroke-width': 1.6, 'stroke-linejoin': 'round', 'stroke-linecap': 'round'}, svg);
+  el('circle', {cx: xs(n - 1), cy: yv(ys[n - 1]), r: 4, fill: css(o.color), stroke: css('--bg'), 'stroke-width': 2}, svg);
+  const cross = el('line', {y1: m.t, y2: H - m.b, stroke: css('--ink-3'), 'stroke-width': 1, visibility: 'hidden'}, svg);
+  const dot = el('circle', {r: 4, fill: css(o.color), stroke: css('--bg'), 'stroke-width': 2, visibility: 'hidden'}, svg);
+  const hit = el('rect', {x: m.l, y: 0, width: W - m.l - m.r, height: H, fill: 'transparent'}, svg);
+  hit.addEventListener('mousemove', e => {
     const r = svg.getBoundingClientRect(), px = (e.clientX - r.left) * W / r.width;
-    const i = Math.max(0, Math.min(n-1, Math.round((px - m.l) / (W - m.l - m.r) * (n - 1))));
-    const x = xs(i), y = yv(ys[i]);
-    cross.setAttribute('x1', x); cross.setAttribute('x2', x); cross.setAttribute('visibility', 'visible');
-    dot.setAttribute('cx', x); dot.setAttribute('cy', y); dot.setAttribute('visibility', 'visible');
-    showTip(host, x * r.width / W, y * r.height / H, `<b>${{fmtDate(dates[i])}}</b><br>${{opts.tipFmt(ys[i], i)}}`);
-  }});
-  hit.addEventListener('mouseleave', () => {{ cross.setAttribute('visibility','hidden'); dot.setAttribute('visibility','hidden'); hideTip(); }});
-}}
+    const i = Math.max(0, Math.min(n - 1, Math.round((px - m.l) / (W - m.l - m.r) * (n - 1))));
+    cross.setAttribute('x1', xs(i)); cross.setAttribute('x2', xs(i)); cross.setAttribute('visibility', 'visible');
+    dot.setAttribute('cx', xs(i)); dot.setAttribute('cy', yv(ys[i])); dot.setAttribute('visibility', 'visible');
+    showTip(e, `<b>${fmtDate(D.dates[i])}</b><br>${o.tipFmt(ys[i])}`);
+  });
+  hit.addEventListener('mouseleave', () => { cross.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); hideTip(); });
+}
 
-function equityChart(id, S) {{
+function equityChart(id, S) {
   const host = document.getElementById(id); if (!host || !S) return; host.innerHTML = '';
-  if (!host.clientWidth) return;
-  const keys = [['A', 'Agent', '--series-1'], ['CONTROL', 'Buy & hold', '--series-2'], ['NIFTY', 'Nifty 50', '--series-3']];
+  const W = host.clientWidth; if (!W) return;
+  const keys = [['A', 'The agent', '--ink'], ['CONTROL', 'Just holding', '--bronze'], ['NIFTY', 'Nifty 50', '--grey']];
   const dates = S.A.map(p => p[0]);
-  const val = {{}}; keys.forEach(([k]) => {{ val[k] = new Map(S[k].map(p => [p[0], p[1]])); }});
-  const W = host.clientWidth, H = 300, m = {{l:72, r:16, t:10, b:26}};
-  const svg = el('svg', {{viewBox:`0 0 ${{W}} ${{H}}`, height:H, role:'img', 'aria-label':'Equity: agent vs buy and hold vs Nifty 50'}}, host);
+  const val = {}; keys.forEach(([k]) => { val[k] = new Map(S[k].map(p => [p[0], p[1]])); });
+  const H = 300, m = {l: 70, r: 12, t: 12, b: 30};
+  const svg = el('svg', {viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': 'Account value: agent, just holding, Nifty 50'}, host);
   const all = keys.flatMap(([k]) => S[k].map(p => p[1]));
   const lo = Math.log(Math.min(...all)), hi = Math.log(Math.max(...all));
   const xs = i => m.l + (W - m.l - m.r) * i / (dates.length - 1);
   const y = v => m.t + (H - m.t - m.b) * (1 - (Math.log(v) - lo) / (hi - lo));
-  const g = el('g', {{class:'axis'}}, svg);
-  [5e5, 1e6, 2e6, 5e6, 1e7, 2e7].forEach(t => {{ if (t < Math.exp(lo) * 0.9 || t > Math.exp(hi) * 1.1) return;
-    el('line', {{x1:m.l, x2:W-m.r, y1:y(t), y2:y(t), class:'gridline'}}, g);
-    el('text', {{x:m.l-8, y:y(t)+4, 'text-anchor':'end'}}, g).textContent = '₹' + (t >= 1e7 ? (t/1e7) + ' cr' : (t/1e5) + ' L'); }});
-  let lastYear = null;
-  dates.forEach((d, i) => {{ const yr = d.slice(0, 4); if (yr !== lastYear) {{ lastYear = yr;
-    if (i > 0) el('text', {{x:xs(i), y:H-6, 'text-anchor':'middle'}}, g).textContent = yr; }} }});
-  keys.forEach(([k, label, c]) => {{
+  const g = el('g', {class: 'axis'}, svg);
+  [5e5, 1e6, 2e6, 5e6, 1e7, 2e7].forEach(t => { if (t < Math.exp(lo) * 0.9 || t > Math.exp(hi) * 1.1) return;
+    el('line', {x1: m.l, x2: W - m.r, y1: y(t), y2: y(t), class: 'grid'}, g);
+    el('text', {x: m.l - 10, y: y(t) + 4, 'text-anchor': 'end'}, g).textContent = t >= 1e7 ? '₹' + t / 1e7 + ' crore' : '₹' + t / 1e5 + ' lakh'; });
+  yearLabels(g, dates, xs, H - 8, false);
+  keys.forEach(([k, , c]) => {
     const pts = dates.map((d, i) => [xs(i), val[k].get(d)]).filter(p => p[1] != null);
-    el('path', {{d: pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + y(p[1]).toFixed(1)).join(''), fill:'none',
-      stroke:css(c), 'stroke-width':2, 'stroke-linejoin':'round', 'stroke-linecap':'round'}}, svg);
-    const [lx, lv] = pts[pts.length - 1];
-    el('circle', {{cx:lx, cy:y(lv), r:4.5, fill:css(c), stroke:css('--surface-1'), 'stroke-width':2}}, svg);
-  }});
-  const cross = el('line', {{y1:m.t, y2:H-m.b, stroke:css('--text-muted'), 'stroke-width':1, visibility:'hidden'}}, svg);
-  const hit = el('rect', {{x:m.l, y:0, width:W-m.l-m.r, height:H, fill:'transparent'}}, svg);
-  const inr = v => '₹' + Math.round(v).toLocaleString('en-IN');
-  hit.addEventListener('mousemove', e => {{
+    el('path', {d: pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + y(p[1]).toFixed(1)).join(''), fill: 'none',
+      stroke: css(c), 'stroke-width': k === 'A' ? 2 : 1.4, 'stroke-linejoin': 'round', 'stroke-linecap': 'round'}, svg);
+  });
+  const cross = el('line', {y1: m.t, y2: H - m.b, stroke: css('--ink-3'), 'stroke-width': 1, visibility: 'hidden'}, svg);
+  const hit = el('rect', {x: m.l, y: 0, width: W - m.l - m.r, height: H, fill: 'transparent'}, svg);
+  hit.addEventListener('mousemove', e => {
     const r = svg.getBoundingClientRect(), px = (e.clientX - r.left) * W / r.width;
     const i = Math.max(0, Math.min(dates.length - 1, Math.round((px - m.l) / (W - m.l - m.r) * (dates.length - 1))));
     cross.setAttribute('x1', xs(i)); cross.setAttribute('x2', xs(i)); cross.setAttribute('visibility', 'visible');
-    showTip(host, xs(i) * r.width / W, m.t + 20, `<b>Week of ${{fmtDate(dates[i])}}</b>` +
-      keys.map(([k, label]) => `<br>${{label}}: ${{val[k].has(dates[i]) ? inr(val[k].get(dates[i])) : '—'}}`).join(''));
-  }});
-  hit.addEventListener('mouseleave', () => {{ cross.setAttribute('visibility', 'hidden'); hideTip(); }});
-}}
+    showTip(e, `<b>Week of ${fmtDate(dates[i])}</b>` + keys.map(([k, label]) => `<br>${label}: ${val[k].has(dates[i]) ? lakh(val[k].get(dates[i])) : '—'}`).join(''));
+  });
+  hit.addEventListener('mouseleave', () => { cross.setAttribute('visibility', 'hidden'); hideTip(); });
+}
 
-function barChart(id, rows) {{
-  const host = document.getElementById(id); host.innerHTML = '';
-  if (!host.clientWidth) return;
-  const W = host.clientWidth, H = 220, m = {{l:64, r:10, t:12, b:28}};
-  const svg = el('svg', {{viewBox:`0 0 ${{W}} ${{H}}`, height:H, role:'img', 'aria-label':'Quarterly revenue'}}, host);
+function barChart(id, rows) {
+  const host = document.getElementById(id); if (!host || !rows.length) return; host.innerHTML = '';
+  const W = host.clientWidth; if (!W) return;
+  const H = 240, m = {l: 70, r: 8, t: 12, b: 30};
+  const svg = el('svg', {viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': 'Sales each quarter'}, host);
   const max = Math.max(...rows.map(r => r.v)), n = rows.length;
-  const step = (W - m.l - m.r) / n, bw = Math.min(24, step - 6);
+  const step = (W - m.l - m.r) / n, bw = Math.max(4, Math.min(22, step - 8));
   const y = v => m.t + (H - m.t - m.b) * (1 - v / max);
-  const g = el('g', {{class:'axis'}}, svg);
-  const tickStep = max > 5e9 ? 2e9 : max > 2e9 ? 1e9 : 5e8;
-  for (let t = 0; t <= max; t += tickStep) {{ el('line', {{x1:m.l, x2:W-m.r, y1:y(t), y2:y(t), class:'gridline'}}, g);
-    el('text', {{x:m.l-8, y:y(t)+4, 'text-anchor':'end'}}, g).textContent = '₹' + (t/1e7).toLocaleString('en-IN') + ' cr'; }}
-  rows.forEach((r, i) => {{
-    const x = m.l + i * step + (step - bw) / 2, top = y(r.v), base = y(0), rr = Math.min(4, (base - top) / 2);
-    el('path', {{d:`M${{x}} ${{base}}V${{top + rr}}Q${{x}} ${{top}} ${{x + rr}} ${{top}}H${{x + bw - rr}}Q${{x + bw}} ${{top}} ${{x + bw}} ${{top + rr}}V${{base}}Z`, fill:css('--series-1')}}, svg);
-    if (i % Math.ceil(n / 7) === 0 || i === n - 1) el('text', {{x:x + bw/2, y:H-8, 'text-anchor':'middle'}}, g).textContent = r.q.slice(0,7);
-    const hit = el('rect', {{x:m.l + i * step, y:m.t, width:step, height:H - m.t - m.b, fill:'transparent'}}, svg);
-    hit.addEventListener('mousemove', e => {{ const rr2 = svg.getBoundingClientRect();
-      showTip(host, (e.clientX - rr2.left), top * rr2.height / H, `<b>Quarter ended ${{fmtDate(r.q)}}</b><br>Revenue ₹${{(r.v/1e7).toLocaleString('en-IN', {{maximumFractionDigits:0}})}} cr`); }});
+  const g = el('g', {class: 'axis'}, svg);
+  const tick = max > 5e9 ? 2e9 : max > 2e9 ? 1e9 : 5e8;
+  for (let t = 0; t <= max; t += tick) { el('line', {x1: m.l, x2: W - m.r, y1: y(t), y2: y(t), class: 'grid'}, g);
+    el('text', {x: m.l - 10, y: y(t) + 4, 'text-anchor': 'end'}, g).textContent = '₹' + (t / 1e7).toLocaleString('en-IN') + ' cr'; }
+  let lastEnd = -1e9;
+  rows.forEach((r, i) => {
+    const x = m.l + i * step + (step - bw) / 2, top = y(r.v), base = y(0), rr = Math.min(3, (base - top) / 2);
+    el('path', {d: `M${x} ${base}V${top + rr}Q${x} ${top} ${x + rr} ${top}H${x + bw - rr}Q${x + bw} ${top} ${x + bw} ${top + rr}V${base}Z`,
+      fill: css(i === n - 1 ? '--ink' : '--bronze')}, svg);
+    const lab = el('text', {x: x + bw / 2, y: H - 8, 'text-anchor': 'middle'}, g);
+    const [yy, mm] = r.q.split('-'); lab.textContent = MONTHS[+mm - 1].slice(0, 3) + ' ' + yy.slice(2);
+    const w = lab.getComputedTextLength();
+    if (x + bw / 2 - w / 2 < lastEnd + 10) lab.remove(); else lastEnd = x + bw / 2 + w / 2;
+    const hit = el('rect', {x: m.l + i * step, y: m.t, width: step, height: H - m.t - m.b, fill: 'transparent'}, svg);
+    hit.addEventListener('mousemove', e => showTip(e, `<b>Quarter to ${fmtDate(r.q)}</b><br>Sales ₹${(r.v / 1e7).toLocaleString('en-IN', {maximumFractionDigits: 0})} crore`));
     hit.addEventListener('mouseleave', hideTip);
-  }});
-}}
+  });
+}
 
-function niceLogTicks(lo, hi) {{ const a = Math.exp(lo), b = Math.exp(hi), out = [];
-  [100,200,500,1000,2000,3000,5000,10000,20000].forEach(t => {{ if (t >= a*0.98 && t <= b*1.02) out.push(t); }}); return out; }}
-function ddTicks(lo) {{ const out = []; for (let t = 0; t >= lo - 1e-9; t -= 0.1) out.push(+t.toFixed(1)); return out.length > 7 ? out.filter((_, i) => i % 2 === 0) : out; }}
-
-const HSTATE = {{conds:'1m', events:'1m'}};
-const VCOLOR = {{'validated':'--good', 'consistent, not yet confirmed':'--good', 'suggestive (not validated)':'--warning', 'no evidence':'--neutral', 'insufficient data':'--neutral'}};
-const VLABEL = {{'validated':'✓ Validated', 'consistent, not yet confirmed':'~ Consistent, not yet confirmed', 'suggestive (not validated)':'! Suggestive, failed validation', 'no evidence':'– No evidence', 'insufficient data':'? Too few events'}};
+const HSTATE = {conds: '1m', events: '1m'};
+const VCOL = {'validated': '--good', 'consistent, not yet confirmed': '--good', 'suggestive (not validated)': '--warning', 'no evidence': '--grey', 'insufficient data': '--grey'};
 const HOLLOW = new Set(['insufficient data', 'consistent, not yet confirmed']);
-function condChart(id, all) {{
-  const H = HSTATE[id];
-  const host = document.getElementById(id); host.innerHTML = '';
-  const rows = all.filter(r => r.h === H && r.edge != null).sort((a, b) => b.edge - a.edge);
-  const W = host.clientWidth, narrow = W < 640, labelW = narrow ? 0 : Math.min(380, W * 0.44);
-  const rowH = narrow ? 44 : 26, m = {{l:labelW + 8, r:16, t:24, b:10}}, Hh = m.t + rows.length * rowH + m.b;
-  const svg = el('svg', {{viewBox:`0 0 ${{W}} ${{Hh}}`, height:Hh, role:'img', 'aria-label':'Average extra return after each condition or event'}}, host);
-  const ext = Math.max(0.02, ...rows.map(r => Math.max(Math.abs(r.ci ? r.ci[0] : r.edge), Math.abs(r.ci ? r.ci[1] : r.edge))));
+const SPAN = {'1w': 'week', '1m': 'month', '3m': 'three months'};
+function dotChart(id, all) {
+  const host = document.getElementById(id); if (!host) return; host.innerHTML = '';
+  const W = host.clientWidth; if (!W) return;
+  const rows = all.filter(r => r.h === HSTATE[id] && r.edge != null).sort((a, b) => b.edge - a.edge);
+  const narrow = W < 640, labelW = narrow ? W - 24 : Math.min(360, W * 0.42);
+  const rowH = narrow ? 46 : 30, m = {l: narrow ? 8 : labelW + 20, r: 12, t: 28, b: 8}, Hh = m.t + rows.length * rowH + m.b;
+  const svg = el('svg', {viewBox: `0 0 ${W} ${Hh}`, height: Hh, role: 'img', 'aria-label': 'What happened next'}, host);
+  const ext = Math.max(0.03, ...rows.map(r => Math.max(Math.abs(r.ci ? r.ci[0] : r.edge), Math.abs(r.ci ? r.ci[1] : r.edge))));
   const x = v => m.l + (W - m.l - m.r) * (v + ext) / (2 * ext);
-  const g = el('g', {{class:'axis'}}, svg);
+  const g = el('g', {class: 'axis'}, svg);
   const step = ext > 0.2 ? 0.1 : ext > 0.08 ? 0.05 : 0.02;
-  for (let t = -Math.floor(ext/step)*step; t <= ext + 1e-9; t += step) {{ const xx = x(t);
-    el('line', {{x1:xx, x2:xx, y1:m.t-4, y2:Hh-m.b, class:'gridline'}}, g);
-    el('text', {{x:xx, y:14, 'text-anchor':'middle'}}, g).textContent = pct(+t.toFixed(3), true).replace('.0%','%'); }}
-  el('line', {{x1:x(0), x2:x(0), y1:m.t-4, y2:Hh-m.b, stroke:css('--text-muted'), 'stroke-width':1}}, svg);
-  rows.forEach((r, i) => {{
-    const cy = m.t + i * rowH + (narrow ? 30 : rowH / 2), c = css(VCOLOR[r.verdict]);
-    const lab = el('text', {{x: narrow ? m.l : labelW, y: narrow ? cy - 14 : cy + 4, 'text-anchor': narrow ? 'start' : 'end', fill:css('--text-primary'), 'font-size':13}}, svg);
-    lab.textContent = r.desc;
-    if (r.ci) el('line', {{x1:x(r.ci[0]), x2:x(r.ci[1]), y1:cy, y2:cy, stroke:c, 'stroke-width':2, 'stroke-linecap':'round'}}, svg);
+  let lastEnd = -1e9;
+  for (let t = -Math.floor(ext / step) * step; t <= ext + 1e-9; t += step) {
+    const xx = x(t); el('line', {x1: xx, x2: xx, y1: m.t - 6, y2: Hh - m.b, class: 'grid'}, g);
+    const lab = el('text', {x: xx, y: 14, 'text-anchor': 'middle'}, g); lab.textContent = (t > 0 ? '+' : '') + Math.round(t * 100) + '%';
+    const w = lab.getComputedTextLength(); if (xx - w / 2 < lastEnd + 8) lab.remove(); else lastEnd = xx + w / 2;
+  }
+  el('line', {x1: x(0), x2: x(0), y1: m.t - 6, y2: Hh - m.b, stroke: css('--ink-3'), 'stroke-width': 1}, svg);
+  rows.forEach((r, i) => {
+    const cy = m.t + i * rowH + (narrow ? 32 : rowH / 2), c = css(VCOL[r.verdict]);
+    const lab = el('text', {x: narrow ? m.l : labelW, y: narrow ? cy - 16 : cy + 4, 'text-anchor': narrow ? 'start' : 'end', fill: css('--ink-2'), 'font-size': 13}, svg);
+    fitText(lab, r.desc, labelW);
+    if (r.ci) el('line', {x1: x(r.ci[0]), x2: x(r.ci[1]), y1: cy, y2: cy, stroke: c, 'stroke-width': 1.6, 'stroke-linecap': 'round'}, svg);
     const hollow = HOLLOW.has(r.verdict);
-    el('circle', {{cx:x(r.edge), cy, r:5, fill: hollow ? css('--surface-1') : c, stroke: hollow ? c : css('--surface-1'), 'stroke-width':2}}, svg);
-    const hit = el('rect', {{x:0, y:cy - rowH/2, width:W, height:rowH, fill:'transparent'}}, svg);
-    hit.addEventListener('mousemove', e => {{ const rr = svg.getBoundingClientRect();
-      showTip(host, (e.clientX - rr.left), cy * rr.height / Hh,
-        `<b>${{r.desc}}</b><br>${{VLABEL[r.verdict]}}<br>Extra return: <b>${{pct(r.edge, true)}}</b>` +
-        (r.ci ? ` (${{pct(r.ci[0], true)}} to ${{pct(r.ci[1], true)}})` : '') +
-        `<br>${{r.n}} events in ${{r.clusters}} separate weeks · p = ${{r.p == null ? '—' : r.p.toFixed(3)}}` +
-        `<br>Before {val_start}: ${{pct(r.disc, true)}} · after: ${{pct(r.val, true)}}` +
-        `<br>{sym} alone: ${{r.nw_n}} events · best estimate ${{pct(r.nw_est, true)}}` +
-        `<br>Compared with: ${{r.baseline}}`); }});
+    el('circle', {cx: x(r.edge), cy, r: 5, fill: hollow ? css('--bg') : c, stroke: hollow ? c : css('--bg'), 'stroke-width': 2}, svg);
+    const hit = el('rect', {x: 0, y: cy - rowH / 2, width: W, height: rowH, fill: 'transparent'}, svg);
+    hit.addEventListener('mousemove', e => showTip(e, `<b>${r.desc}</b><br>${r.plain}<br>Over the next ${SPAN[r.h]}: ` +
+      `${r.edge >= 0 ? 'better' : 'worse'} than usual by ${pct(Math.abs(r.edge))}` + (r.ci ? `<br>Likely somewhere between ${pct(r.ci[0], true)} and ${pct(r.ci[1], true)}` : '') +
+      `<br>Seen ${r.n} times`));
     hit.addEventListener('mouseleave', hideTip);
-  }});
-  const t = document.getElementById(id + 'table');
-  t.innerHTML = '<tr><th>What happened</th><th>Verdict</th><th class=n>Extra return</th><th class=n>95% range</th><th class=n>Events</th><th class=n>Weeks</th><th class=n>p</th><th class=n>Before / after split</th><th class=n>{sym} events</th><th class=n>{sym} estimate</th></tr>' +
-    all.filter(r => r.h === H).map(r => `<tr><td>${{r.desc}}</td><td>${{VLABEL[r.verdict]}}</td><td class=n>${{pct(r.edge, true)}}</td>` +
-    `<td class=n>${{r.ci ? pct(r.ci[0], true) + ' to ' + pct(r.ci[1], true) : '—'}}</td><td class=n>${{r.n ?? 0}}</td><td class=n>${{r.clusters ?? 0}}</td>` +
-    `<td class=n>${{r.p == null ? '—' : r.p.toFixed(3)}}</td><td class=n>${{pct(r.disc, true)}} / ${{pct(r.val, true)}}</td><td class=n>${{r.nw_n ?? 0}}</td><td class=n>${{pct(r.nw_est, true)}}</td></tr>`).join('');
-}}
-const CHARTDATA = {{conds: () => D.conds, events: () => D.events}};
-document.querySelectorAll('.tabs').forEach(group => group.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {{
-  const id = group.dataset.chart; HSTATE[id] = b.dataset.h;
-  group.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b)); condChart(id, CHARTDATA[id]()); }})));
+  });
+}
+document.querySelectorAll('.seg').forEach(group => group.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+  HSTATE[group.dataset.chart] = b.dataset.h;
+  group.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b));
+  dotChart(group.dataset.chart, D[group.dataset.chart]);
+})));
 
+function logTicks(lo, hi) { const a = Math.exp(lo), b = Math.exp(hi), out = [];
+  [100, 200, 500, 1000, 2000, 3000, 5000, 10000, 20000].forEach(t => { if (t >= a * 0.98 && t <= b * 1.02) out.push(t); }); return out; }
+function ddTicks(lo) { const out = []; for (let t = 0; t >= lo - 1e-9; t -= 0.1) out.push(+t.toFixed(1)); return out.length > 6 ? out.filter((_, i) => i % 2 === 0) : out; }
 
-const store = {{ get: k => {{ try {{ return localStorage.getItem(k); }} catch (e) {{ return null; }} }},
-                 set: (k, v) => {{ try {{ localStorage.setItem(k, v); }} catch (e) {{}} }} }};
-function isDark() {{
-  const t = document.documentElement.dataset.theme;
-  return t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
-}}
-function paintThemeButton() {{ document.getElementById('theme').textContent = isDark() ? 'Light mode' : 'Dark mode'; }}
-document.getElementById('theme').addEventListener('click', () => {{
-  const next = isDark() ? 'light' : 'dark';
-  document.documentElement.dataset.theme = next; store.set('dossier-theme', next);
-  paintThemeButton(); drawAll();
-}});
-function showTab(id) {{
+function drawAll() {
+  lineChart('price', D.close, {h: 300, log: true, color: '--ink', label: 'Share price since listing', ticks: logTicks,
+    fmt: v => '₹' + v.toLocaleString('en-IN'), tipFmt: v => 'Closing price ₹' + v.toLocaleString('en-IN', {minimumFractionDigits: 2})});
+  lineChart('dd', D.dd, {h: 200, area: true, zeroTop: true, color: '--down', label: 'How far below its high', ticks: ddTicks,
+    fmt: v => Math.round(v * 100) + '%', tipFmt: v => v === 0 ? 'At a new high' : (v * 100).toFixed(1) + '% below its high'});
+  barChart('revbars', D.revenue);
+  equityChart('agentEq', D.equity);
+  dotChart('conds', D.conds);
+  dotChart('events', D.events);
+}
+
+const store = { get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
+                set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} } };
+const isDark = () => { const t = document.documentElement.dataset.theme; return t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches; };
+const paintTheme = () => { document.getElementById('theme').textContent = isDark() ? 'Light' : 'Dark'; };
+document.getElementById('theme').addEventListener('click', () => {
+  const next = isDark() ? 'light' : 'dark'; document.documentElement.dataset.theme = next; store.set('dossier-theme', next);
+  paintTheme(); drawAll();
+});
+function showTab(id) {
   const tabs = [...document.querySelectorAll('.tabbar button')];
   if (!tabs.some(b => b.dataset.tab === id)) id = tabs[0].dataset.tab;
   tabs.forEach(b => b.setAttribute('aria-selected', b.dataset.tab === id));
-  document.querySelectorAll('.panel').forEach(p => {{ p.hidden = p.dataset.tab !== id; }});
+  document.querySelectorAll('.panel').forEach(p => { p.hidden = p.dataset.tab !== id; });
   if (location.hash !== '#' + id) history.replaceState(null, '', '#' + id);
-  drawAll();
-}}
-document.querySelectorAll('.tabbar button').forEach(b => b.addEventListener('click', () => {{ showTab(b.dataset.tab); window.scrollTo({{top: 0}}); }}));
-
-function drawAll() {{
-  lineChart('price', D.series.close, {{h:300, log:true, color:'--series-1', label:'Price since listing',
-    ticks:niceLogTicks, fmt:v => '₹' + v.toLocaleString('en-IN'), tipFmt:v => 'Close ₹' + v.toLocaleString('en-IN', {{minimumFractionDigits:2}})}});
-  lineChart('dd', D.series.dd, {{h:200, area:true, zeroTop:true, color:'--series-dd', wash:'--wash-dd', label:'Distance below previous peak',
-    ticks:ddTicks, fmt:v => (v*100).toFixed(0) + '%', tipFmt:v => (v === 0 ? 'At a new high' : (v*100).toFixed(1) + '% below its peak')}});
-  condChart('conds', D.conds);
-  condChart('events', D.events);
-  if (D.revenue.length) barChart('revbars', D.revenue);
-  if (D.agent) equityChart('agentEq', D.agent);
-}}
-paintThemeButton();
+  hideTip(); drawAll();
+}
+document.querySelectorAll('.tabbar button').forEach(b => b.addEventListener('click', () => { showTab(b.dataset.tab); scrollTo({top: 0}); }));
+paintTheme();
 showTab(location.hash.slice(1));
-window.scrollTo(0, 0);
-let rt; window.addEventListener('resize', () => {{ clearTimeout(rt); rt = setTimeout(drawAll, 120); }});
+scrollTo(0, 0);
+if (document.fonts) document.fonts.ready.then(drawAll);
+let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(drawAll, 120); });
+addEventListener('scroll', hideTip, {passive: true});
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', drawAll);
-</script>
-</body></html>
 """

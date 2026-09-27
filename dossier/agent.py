@@ -488,7 +488,40 @@ def _open_json(book, bars):
             "pnl_pct": float(100 * pnl / (e["shares"] * e["price"])), "entry_reason": e["reason"], "exit_reason": ""}
 
 
-def report_data(bars, start, results, bench, paper_book, paper_eq, state):
+def today_signal(bars, known, book, state):
+    """The next-session instruction in plain terms (what, how many, why)."""
+    day = bars.index[-1]
+    k = known.loc[day]
+    px = float(bars["Close"].iloc[-1])
+    equity = book.cash + book.shares * px
+    pend = state.get("pending")
+    if pend and pend["side"] == "buy":
+        shares = int(equity * pend["weight"] // (px * 1.003))
+        action, weight = "buy", pend["weight"]
+    elif pend and pend["side"] == "add":
+        shares = int(min(pend["weight"] * equity, book.cash) // (px * 1.003))
+        action, weight = "add", pend["weight"]
+    elif pend and pend["side"] == "trim":
+        shares, action, weight = int(pend["shares"]), "trim", None
+    elif pend and pend["side"] == "sell":
+        shares, action, weight = int(book.shares), "sell", None
+    else:
+        shares, action, weight = int(book.shares), ("hold" if book.shares else "wait"), None
+    i = len(bars.index) - 1
+    last_bad = known.index[(known["weak_results"] | known["profit_decline"])]
+    return {
+        "as_of": day.date().isoformat(), "action": action, "shares": shares, "weight": weight,
+        "ref_price": px, "ref_value": shares * px, "equity": equity,
+        "revenue_yoy": None if np.isnan(k["revenue_yoy"]) else float(k["revenue_yoy"]),
+        "growth_note": k["growth_note"], "vol63": None if np.isnan(k["vol63"]) else float(k["vol63"]),
+        "target_vol": TARGET_VOL, "cool_off": COOL_OFF, "reaction_cut": REACTION_CUT,
+        "cooling_sessions_left": max(0, book.cool_until - i),
+        "last_bad_results": last_bad[-1].date().isoformat() if len(last_bad) else None,
+        "last_bad_note": known.at[last_bad[-1], "note"].strip() if len(last_bad) else None,
+    }
+
+
+def report_data(bars, start, results, bench, paper_book, paper_eq, state, known=None):
     """Everything report.html shows about the agent, JSON-serialisable."""
     def weekly(eq):
         w = eq.resample("W-FRI").last().dropna()
@@ -520,4 +553,5 @@ def report_data(bars, start, results, bench, paper_book, paper_eq, state):
         },
         "variants": study and {"keep_rule": study["keep_rule"], "verdicts": study["verdicts"]},
         "costs_round_trip_pct_at_5L": round_trip_pct(5e5),
+        "today": today_signal(bars, known, paper_book, state) if known is not None else None,
     }

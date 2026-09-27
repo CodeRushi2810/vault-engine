@@ -103,7 +103,7 @@ def cmd_agent(push, show="paper"):
             print(f"  Order for the next open: {order['side'].upper()} about {est} shares (last close ₹{px:,.2f})")
         print(f"  Why: {(last['reason'] or '').replace(' | ', chr(10) + '       ') or 'no change'}")
 
-    _write(agent.AGENT_FILE, agent.report_data(bars, start, results, bench, paper_book, paper_eq, state))
+    _write(agent.AGENT_FILE, agent.report_data(bars, start, results, bench, paper_book, paper_eq, state, known))
     from dossier import report
     report.render(dossier_path, bars)
 
