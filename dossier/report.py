@@ -394,6 +394,28 @@ def _agent(ag, sym):
         _stat(f"Just holding {sym}", _words(became(hold)), f"worst fall {hold['max_drawdown_pct']:.0f}%"),
         _stat("The Nifty 50 index", _words(became(nifty)), f"worst fall {nifty['max_drawdown_pct']:.0f}%"),
     ]
+    # The comparison sentence is computed, never written in: it must stay true as the data changes.
+    ratio = became(a) / became(hold)
+    level = ("ended up about level with" if 0.9 <= ratio <= 1.1 else
+             f"ended up {abs(ratio - 1):.0%} {'ahead of' if ratio > 1 else 'behind'}")
+    hold_eq = bt["equity"]["CONTROL"]
+    peak_i, trough_i, run_max, best = 0, 0, 0, 0.0
+    for i, (_, v) in enumerate(hold_eq):
+        if v > hold_eq[run_max][1]:
+            run_max = i
+        dd_i = v / hold_eq[run_max][1] - 1
+        if dd_i < best:
+            best, peak_i, trough_i = dd_i, run_max, i
+    peak_day, trough_day = hold_eq[peak_i][0], hold_eq[trough_i][0]
+    sold_in_fall = any(t["status"] == "CLOSED" and peak_day <= t["exit"] <= trough_day for t in bt["trades"])
+    dd_a, dd_h = abs(a["max_drawdown_pct"]), abs(hold["max_drawdown_pct"])
+    if dd_a < dd_h - 5:
+        risk = f"but its <b>worst fall was {dd_a:.0f}% instead of {dd_h:.0f}%</b>" + (
+            f", because it sold during the big drop between {_d(peak_day)} and {_d(trough_day)}" if sold_in_fall else "")
+    elif dd_a > dd_h + 5:
+        risk = f"and its <b>worst fall was deeper: {dd_a:.0f}% against {dd_h:.0f}%</b>"
+    else:
+        risk = f"with a similar worst fall ({dd_a:.0f}% against {dd_h:.0f}%)"
     tried = ""
     if ag.get("variants"):
         plain = {"D": "Selling when the price drops sharply (a “stop-loss”)", "E": "Buying extra after a few falling days",
@@ -412,9 +434,8 @@ def _agent(ag, sym):
 {paper_tbl}
 {_details(f"Every decision ({len(drows)} so far)", _table(["At the close of", "Decision", "Reason"], drows))}
 <h3>How the same rules would have done since {_d(bt['start'])}</h3>
-<p class="intro">Starting with {_inr(cap)}, after all trading charges. The agent ended up about level with simply holding,
-but its <b>worst fall was {abs(a['max_drawdown_pct']):.0f}% instead of {abs(hold['max_drawdown_pct']):.0f}%</b>, because it sold before the
-big drop in early 2025. This replay uses rules found on the same period, so it shows how the rules work, not proof that they will keep working.</p>
+<p class="intro">Starting with {_inr(cap)}, after all trading charges. The agent {level} simply holding,
+{risk}. This replay uses rules found on the same period, so it shows how the rules work, not proof that they will keep working.</p>
 <div class="stats three">{''.join(stats)}</div>
 <div class="legend"><span><i class="k-ink"></i>The agent</span><span><i class="k-bronze"></i>Just holding {sym}</span><span><i class="k-grey"></i>Nifty 50</span></div>
 <div class="chart" id="agentEq"></div>
@@ -448,6 +469,9 @@ def _research(d, sym):
               '<button data-h="3m" aria-pressed="false">3 months</button></div>')
     legend = ('<div class="legend"><span><i class="k-good"></i>Proven</span><span><i class="k-good-o"></i>Promising, not yet proven</span>'
               '<span><i class="k-warn"></i>A weak hint</span><span><i class="k-grey"></i>No effect</span><span><i class="k-grey-o"></i>Too little data</span></div>')
+    proven_patterns = count(cr, "validated")
+    patterns_line = ("None beat picking a random day." if not proven_patterns else
+                     f"{proven_patterns} of them held up in testing.")
     html_ = f"""
 <p class="intro">We asked: after something happens, does {sym} (and similar companies) do better or worse than usual over the
 following weeks? Each dot is the answer; the line through it is how sure we are. If the line crosses the middle, we can't tell it apart from luck.</p>
@@ -457,7 +481,7 @@ following weeks? Each dot is the answer; the line through it is how sure we are.
 {toggle.format(id='events')}{legend}
 <div class="chart" id="events"></div>
 <h3>After chart patterns</h3>
-<p class="fine">Signals people often watch on price charts. None beat picking a random day.</p>
+<p class="fine">Signals people often watch on price charts. {patterns_line}</p>
 {toggle.format(id='conds')}{legend}
 <div class="chart" id="conds"></div>"""
     return html_, rows(cr), rows(er)
