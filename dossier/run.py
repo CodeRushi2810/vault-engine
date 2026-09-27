@@ -6,6 +6,7 @@
     python -m dossier.run check            # audit + Yahoo cross-check for the whole universe
     python -m dossier.run agent            # backtest + advance the paper ledger + push to the dashboard
     python -m dossier.run agent --no-push  # same, but only write the dashboard JSON locally
+    python -m dossier.run agent --show backtest  # dashboard trades show the backtest account instead
 """
 import argparse
 import json
@@ -66,7 +67,7 @@ def cmd_check():
     _write(os.path.join(CACHE_DIR, "data_check.json"), report)
 
 
-def cmd_agent(push):
+def cmd_agent(push, show="paper"):
     from dossier import agent, dashboard
 
     dossier_path = os.path.join(CACHE_DIR, universe.FOCUS, "dossier.json")
@@ -101,7 +102,7 @@ def cmd_agent(push):
             print(f"  Order for the next open: {order['side'].upper()} about {est} shares (last close ₹{px:,.2f})")
         print(f"  Why: {(last['reason'] or '').replace(' | ', chr(10) + '       ') or 'no change'}")
 
-    data = dashboard.payload(bars, start, results, bench, paper_book, dossier)
+    data = dashboard.payload(bars, start, results, bench, paper_book, dossier, show=show)
     _write(os.path.join(CACHE_DIR, universe.FOCUS, "dashboard_payload.json"), data)
     if push:
         backup = dashboard.push(data)
@@ -119,6 +120,8 @@ def main():
     sub.add_parser("check")
     ag = sub.add_parser("agent")
     ag.add_argument("--no-push", action="store_true", help="write the dashboard JSON locally only")
+    ag.add_argument("--show", choices=["paper", "backtest"], default="paper",
+                    help="which Rs 10 lakh book the dashboard's trades show (default: the paper ledger)")
     args = ap.parse_args()
 
     if args.cmd == "sync":
@@ -141,7 +144,7 @@ def main():
     elif args.cmd == "check":
         cmd_check()
     elif args.cmd == "agent":
-        cmd_agent(push=not args.no_push)
+        cmd_agent(push=not args.no_push, show=args.show)
 
 
 if __name__ == "__main__":

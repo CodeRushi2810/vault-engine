@@ -47,6 +47,18 @@ def _trade_row(status, entry_time, entry_price, exit_time, exit_price, shares, s
     }
 
 
+def backtest_trades(book, bars):
+    """The backtest account (config A) as dashboard trades, open position included,
+    so the dashboard's cash formula shows that ₹10 lakh book as it grew."""
+    last_px, last_day = float(bars["Close"].iloc[-1]), bars.index[-1]
+    rows = [_trade_row("CLOSED", t["entry_time"], t["entry_price"], t["exit_time"], t["exit_price"],
+                       t["shares"], f"{A.POLICY} · backtest") for t in book.trades]
+    if book.entry:
+        e = book.entry
+        rows.append(_trade_row("OPEN", e["time"], e["price"], last_day, last_px, e["shares"], f"{A.POLICY} · backtest"))
+    return rows
+
+
 def trades(paper_book, bars):
     """The paper ledger only.
 
@@ -160,7 +172,9 @@ def backtest_block(bars, start, results, bench, dossier):
     }
 
 
-def payload(bars, start, results, bench, paper_book, dossier):
+def payload(bars, start, results, bench, paper_book, dossier, show="paper"):
+    """`show` picks which ₹10 lakh book the dashboard's trades/cash display:
+    'paper' (the forward ledger) or 'backtest' (config A's simulated history)."""
     last_px = float(bars["Close"].iloc[-1])
     unrl = (paper_book.shares * last_px - paper_book.entry["shares"] * paper_book.entry["price"]) if paper_book.entry else 0.0
     realised = sum(t["pnl"] for t in paper_book.trades)
@@ -179,7 +193,8 @@ def payload(bars, start, results, bench, paper_book, dossier):
                      "net_pnl_mark_to_market": round(equity - A.CAPITAL, 2),
                      "return_on_initial_pct": round(100 * (equity / A.CAPITAL - 1), 3), "cash": round(paper_book.cash, 2),
                      "pending_order": paper_book.pending},
-        "trades": trades(paper_book, bars),
+        "trades": backtest_trades(results[0]["book"], bars) if show == "backtest" else trades(paper_book, bars),
+        "trades_view": show,
         "backtest": backtest_block(bars, start, results, bench, dossier),
         "market_data": {universe.FOCUS: float(bars["Close"].iloc[-1])},
         "prevClosePrices": {universe.FOCUS: {"prev_close": float(bars["Close"].iloc[-2])}},
@@ -206,7 +221,7 @@ def push(data):
 
     existing = dict((current or {}).get("data") or {})
     merged = dict(existing)
-    for key in ("kind", "strategy", "generated_at", "run_id", "disclaimer", "headline"):
+    for key in ("kind", "strategy", "generated_at", "run_id", "disclaimer", "headline", "trades_view"):
         merged[key] = data[key]
     merged["trades"] = data["trades"]
     merged["backtest"] = data["backtest"]
