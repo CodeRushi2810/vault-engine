@@ -436,6 +436,7 @@ TEMPLATE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{sym} Stock Dossier</title>
+<script>try {{ const t = localStorage.getItem('dossier-theme'); if (t) document.documentElement.dataset.theme = t; }} catch (e) {{}}</script>
 <style>
 :root {{
   color-scheme: light;
@@ -506,40 +507,68 @@ tr.hl td {{ background:var(--wash-1); }}
 details summary {{ cursor:pointer; color:var(--text-secondary); margin-top:10px; }}
 ul {{ padding-left:20px; }} li {{ margin:4px 0; }}
 code {{ font-size:13px; }}
+.top {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; }}
+.themebtn {{ font:inherit; font-size:13.5px; padding:6px 14px; border-radius:999px; border:1px solid var(--line);
+  background:var(--surface-1); color:var(--text-primary); cursor:pointer; }}
+.tabbar {{ position:sticky; top:0; z-index:4; display:flex; gap:4px; overflow-x:auto; margin:18px -16px 8px; padding:10px 16px;
+  background:var(--surface-0); border-bottom:1px solid var(--line); scrollbar-width:none; }}
+.tabbar button {{ font:inherit; font-size:14px; white-space:nowrap; padding:7px 14px; border-radius:8px; border:0;
+  background:transparent; color:var(--text-secondary); cursor:pointer; }}
+.tabbar button:hover {{ background:var(--surface-1); color:var(--text-primary); }}
+.tabbar button[aria-selected="true"] {{ background:var(--text-primary); color:var(--surface-0); }}
+.panel > h2:first-child, .panel > .card:first-child {{ margin-top:12px; }}
 td.pos {{ color:var(--good); }} td.neg {{ color:var(--critical); }}
 td.why {{ font-size:13px; color:var(--text-secondary); min-width:260px; }}
 </style></head>
 <body><main>
-<h1>{sym} Stock Dossier</h1>
-<p class="sub">Data to {as_of} · {bars} sessions since {first} · built {generated}</p>
+<header class="top"><div><h1>{sym} Stock Dossier</h1>
+<p class="sub">Data to {as_of} · {bars} sessions since {first} · built {generated}</p></div>
+<button id="theme" class="themebtn" type="button" aria-label="Switch theme">Dark mode</button></header>
 
+<nav class="tabbar" role="tablist" aria-label="Report sections">
+<button role="tab" data-tab="overview" aria-selected="false">Overview</button><button role="tab" data-tab="agent" aria-selected="false">Trading agent</button><button role="tab" data-tab="risk" aria-selected="false">Price &amp; risk</button><button role="tab" data-tab="business" aria-selected="false">Business</button><button role="tab" data-tab="when" aria-selected="false">What happens when</button><button role="tab" data-tab="evidence" aria-selected="false">Evidence &amp; data</button>
+</nav>
+<section class="panel" id="tab-overview" role="tabpanel" data-tab="overview" hidden>
 <div class="card headline">{headline}
 <p class="disclaimer">Research for paper trading only. This is not investment advice, and past behaviour does not guarantee future returns.</p></div>
 
 <div class="tiles">{tiles}</div>
-
-{agent}
-
-<h2>Price since listing</h2>
-<p class="sub">NSE closing price, adjusted for splits and bonuses. Log scale, so equal heights mean equal percentage moves.</p>
-<div class="card"><div class="chart" id="price"></div></div>
-
-<h2>Distance below its previous peak</h2>
-<p class="sub">How far the price sat below its highest close so far. The worst fall took {worst_dd} off its value, from {worst_peak} to {worst_trough}.</p>
-<div class="card"><div class="chart" id="dd"></div></div>
-
-<h2>What has happened after a random day</h2>
-<p class="sub">The baseline for every other number. Buying on any day and holding for a fixed period gave the returns below. The mean mostly reflects the stock's rise since listing; it is not a forecast.</p>
-<div class="card scroll"><table>
-<tr><th>Hold for</th><th class=n>Independent periods</th><th class=n>Average</th><th class=n>95% range of the average</th><th class=n>Ended up</th><th class=n>Bad case (10%)</th><th class=n>Good case (90%)</th><th class=n>Typical dip along the way</th></tr>
-{fwd_rows}</table></div>
-
 <h2>What is true right now</h2>
 <p class="sub">Tracked conditions active at the latest close, with what the evidence says for each holding period.</p>
 <div class="card scroll"><table>
 <tr><th>Condition</th><th>Since</th><th class=n>Sessions</th><th>1 week</th><th>1 month</th><th>3 months</th></tr>
 {now_rows}</table></div>
-
+</section>
+<section class="panel" id="tab-agent" role="tabpanel" data-tab="agent" hidden>
+{agent}
+</section>
+<section class="panel" id="tab-risk" role="tabpanel" data-tab="risk" hidden>
+<h2>Price since listing</h2>
+<p class="sub">NSE closing price, adjusted for splits and bonuses. Log scale, so equal heights mean equal percentage moves.</p>
+<div class="card"><div class="chart" id="price"></div></div>
+<h2>Distance below its previous peak</h2>
+<p class="sub">How far the price sat below its highest close so far. The worst fall took {worst_dd} off its value, from {worst_peak} to {worst_trough}.</p>
+<div class="card"><div class="chart" id="dd"></div></div>
+<h2>What has happened after a random day</h2>
+<p class="sub">The baseline for every other number. Buying on any day and holding for a fixed period gave the returns below. The mean mostly reflects the stock's rise since listing; it is not a forecast.</p>
+<div class="card scroll"><table>
+<tr><th>Hold for</th><th class=n>Independent periods</th><th class=n>Average</th><th class=n>95% range of the average</th><th class=n>Ended up</th><th class=n>Bad case (10%)</th><th class=n>Good case (90%)</th><th class=n>Typical dip along the way</th></tr>
+{fwd_rows}</table></div>
+<h2>How it moves with the market</h2>
+<p class="sub">Beta is how much NETWEB tends to move for a 1% index move. The highlighted row is the index that explains the most of its moves ({best_fit}).</p>
+<div class="card scroll"><table>
+<tr><th>Index</th><th class=n>Beta</th><th class=n>On down days</th><th class=n>On up days</th><th class=n>Moves explained</th><th class=n>Sessions</th></tr>
+{rel_rows}</table></div>
+</section>
+<section class="panel" id="tab-business" role="tabpanel" data-tab="business" hidden>
+{scorecard}
+<h2>Around results</h2>
+<p class="sub">Each result is dated by the first session the market could trade on it: a release after 3:30pm reacts the next day. The reaction runs from the close before the release to the close of that session.</p>
+<div class="tiles">{ev_tiles}</div>
+<p class="sub" style="margin-top:12px">{ev_upcoming}</p>
+{ev_table}
+</section>
+<section class="panel" id="tab-when" role="tabpanel" data-tab="when" hidden>
 <h2>What happens when…</h2>
 <p class="sub">Each dot is the average extra return after a condition first appears, compared with a random peer bought the same day. The bar shows the 95% range. Anything crossing zero is indistinguishable from nothing.</p>
 <div class="tabs" role="group" aria-label="Holding period" data-chart="conds">
@@ -547,15 +576,6 @@ td.why {{ font-size:13px; color:var(--text-secondary); min-width:260px; }}
 {legend}
 <div class="card"><div class="chart" id="conds"></div></div>
 <details><summary>Show the full table</summary><div class="card scroll"><table id="condstable"></table></div></details>
-
-{scorecard}
-
-<h2>Around results</h2>
-<p class="sub">Each result is dated by the first session the market could trade on it: a release after 3:30pm reacts the next day. The reaction runs from the close before the release to the close of that session.</p>
-<div class="tiles">{ev_tiles}</div>
-<p class="sub" style="margin-top:12px">{ev_upcoming}</p>
-{ev_table}
-
 <h2>What happens after events</h2>
 <p class="sub">The same test as above, for company events across the comparison group: results split by first reaction ({ev_cut} either way), NSE filing categories, bulk and block deals, and promoter stake changes. The trade enters at the open after the event is public. {ev_tests} tests.</p>
 <div class="tabs" role="group" aria-label="Holding period" data-chart="events">
@@ -565,23 +585,16 @@ td.why {{ font-size:13px; color:var(--text-secondary); min-width:260px; }}
 <details><summary>Show the full table</summary><div class="card scroll"><table id="eventstable"></table></div></details>
 <div class="card"><p><b>Recent {sym} events</b></p><ul>{ev_recent}</ul>
 <p class="disclaimer">Filing categories come from NSE; their content (for example a rating upgrade vs a downgrade, or the size of an order) is in the PDF and is not read yet. Bulk deals exclude clients who bought and sold the same stock that day (high-frequency and prop desks).</p></div>
-
-<h2>How it moves with the market</h2>
-<p class="sub">Beta is how much NETWEB tends to move for a 1% index move. The highlighted row is the index that explains the most of its moves ({best_fit}).</p>
-<div class="card scroll"><table>
-<tr><th>Index</th><th class=n>Beta</th><th class=n>On down days</th><th class=n>On up days</th><th class=n>Moves explained</th><th class=n>Sessions</th></tr>
-{rel_rows}</table></div>
-
+</section>
+<section class="panel" id="tab-evidence" role="tabpanel" data-tab="evidence" hidden>
 <h2>Comparison group</h2>
 <p class="sub">How closely each stock moves with NETWEB once the whole market's move is removed (0 = unrelated, 1 = identical).</p>
 <div class="card scroll"><table>
 <tr><th>Stock</th><th>Role</th><th class=n>Co-movement</th><th class=n>95% range</th><th class=n>Sessions</th><th class=n>Volatility</th></tr>
 {peer_rows}</table></div>
-
 <h2>Data quality</h2>
 <div class="card"><p><b>Source:</b> NSE official daily files. <b>Splits and bonuses:</b> {ca_line}</p>
 <p><b>Yahoo cross-check:</b> {yahoo_line}</p><ul>{issue_rows}</ul></div>
-
 <h2>How the evidence is judged</h2>
 <div class="card"><ul>
 <li>Signals use only information available at that day's close; the trade is entered at the <b>next session's open</b>.</li>
@@ -594,6 +607,7 @@ td.why {{ font-size:13px; color:var(--text-secondary); min-width:260px; }}
 <li>The method is tested: a deliberately planted signal is found and validated, and a random one is rejected.</li>
 <li>Returns are before costs; allow roughly 0.3% for a round trip.</li>
 </ul></div>
+</section>
 </main>
 <div class="tip" id="tip"></div>
 <script>
@@ -615,6 +629,7 @@ const hideTip = () => tip.style.display = 'none';
 
 function lineChart(id, ys, opts) {{
   const host = document.getElementById(id); host.innerHTML = '';
+  if (!host.clientWidth) return;
   const W = host.clientWidth, H = opts.h, m = {{l:56, r:14, t:10, b:26}};
   const svg = el('svg', {{viewBox:`0 0 ${{W}} ${{H}}`, height:H, role:'img', 'aria-label':opts.label}}, host);
   const n = ys.length, xs = i => m.l + (W - m.l - m.r) * i / (n - 1);
@@ -655,6 +670,7 @@ function lineChart(id, ys, opts) {{
 
 function equityChart(id, S) {{
   const host = document.getElementById(id); if (!host || !S) return; host.innerHTML = '';
+  if (!host.clientWidth) return;
   const keys = [['A', 'Agent', '--series-1'], ['CONTROL', 'Buy & hold', '--series-2'], ['NIFTY', 'Nifty 50', '--series-3']];
   const dates = S.A.map(p => p[0]);
   const val = {{}}; keys.forEach(([k]) => {{ val[k] = new Map(S[k].map(p => [p[0], p[1]])); }});
@@ -693,6 +709,7 @@ function equityChart(id, S) {{
 
 function barChart(id, rows) {{
   const host = document.getElementById(id); host.innerHTML = '';
+  if (!host.clientWidth) return;
   const W = host.clientWidth, H = 220, m = {{l:64, r:10, t:12, b:28}};
   const svg = el('svg', {{viewBox:`0 0 ${{W}} ${{H}}`, height:H, role:'img', 'aria-label':'Quarterly revenue'}}, host);
   const max = Math.max(...rows.map(r => r.v)), n = rows.length;
@@ -765,6 +782,29 @@ document.querySelectorAll('.tabs').forEach(group => group.querySelectorAll('butt
   const id = group.dataset.chart; HSTATE[id] = b.dataset.h;
   group.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b)); condChart(id, CHARTDATA[id]()); }})));
 
+
+const store = {{ get: k => {{ try {{ return localStorage.getItem(k); }} catch (e) {{ return null; }} }},
+                 set: (k, v) => {{ try {{ localStorage.setItem(k, v); }} catch (e) {{}} }} }};
+function isDark() {{
+  const t = document.documentElement.dataset.theme;
+  return t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+}}
+function paintThemeButton() {{ document.getElementById('theme').textContent = isDark() ? 'Light mode' : 'Dark mode'; }}
+document.getElementById('theme').addEventListener('click', () => {{
+  const next = isDark() ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next; store.set('dossier-theme', next);
+  paintThemeButton(); drawAll();
+}});
+function showTab(id) {{
+  const tabs = [...document.querySelectorAll('.tabbar button')];
+  if (!tabs.some(b => b.dataset.tab === id)) id = tabs[0].dataset.tab;
+  tabs.forEach(b => b.setAttribute('aria-selected', b.dataset.tab === id));
+  document.querySelectorAll('.panel').forEach(p => {{ p.hidden = p.dataset.tab !== id; }});
+  if (location.hash !== '#' + id) history.replaceState(null, '', '#' + id);
+  drawAll();
+}}
+document.querySelectorAll('.tabbar button').forEach(b => b.addEventListener('click', () => {{ showTab(b.dataset.tab); window.scrollTo({{top: 0}}); }}));
+
 function drawAll() {{
   lineChart('price', D.series.close, {{h:300, log:true, color:'--series-1', label:'Price since listing',
     ticks:niceLogTicks, fmt:v => '₹' + v.toLocaleString('en-IN'), tipFmt:v => 'Close ₹' + v.toLocaleString('en-IN', {{minimumFractionDigits:2}})}});
@@ -775,7 +815,9 @@ function drawAll() {{
   if (D.revenue.length) barChart('revbars', D.revenue);
   if (D.agent) equityChart('agentEq', D.agent);
 }}
-drawAll();
+paintThemeButton();
+showTab(location.hash.slice(1));
+window.scrollTo(0, 0);
 let rt; window.addEventListener('resize', () => {{ clearTimeout(rt); rt = setTimeout(drawAll, 120); }});
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', drawAll);
 </script>
