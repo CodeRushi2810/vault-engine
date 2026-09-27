@@ -7,6 +7,7 @@
     python -m dossier.run agent            # backtest + advance the paper ledger + push to the dashboard
     python -m dossier.run agent --no-push  # same, but only write the dashboard JSON locally
     python -m dossier.run agent --show backtest  # dashboard trades show the backtest account instead
+    python -m dossier.run variants         # test the pre-registered rule variants on NETWEB + peers
 """
 import argparse
 import json
@@ -109,6 +110,19 @@ def cmd_agent(push, show="paper"):
         print(f"Pushed to MongoDB vault_db.dashboard_snapshot (previous snapshot saved to {backup})")
 
 
+def cmd_variants():
+    from dossier import agent
+    table, verdicts = agent.variant_study()
+    print(agent.KEEP_RULE)
+    for vid, v in verdicts.items():
+        print(f"  {vid}: {'KEEP' if v['keep'] else 'reject'}  Sharpe up on {universe.FOCUS}: {v['focus_sharpe_up']}, "
+              f"peers {v['peers_sharpe_up']}/{v['peers']}, peer median max DD {v['peer_median_dd_base']:.1f}% -> "
+              f"{v['peer_median_dd_variant']:.1f}%   {v['name']}")
+    _write(os.path.join(CACHE_DIR, universe.FOCUS, "variant_study.json"),
+           {"generated_at": datetime.now().isoformat(timespec="seconds"), "keep_rule": agent.KEEP_RULE,
+            "verdicts": verdicts, "table": table})
+
+
 def main():
     ap = argparse.ArgumentParser(prog="python -m dossier.run")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -118,6 +132,7 @@ def main():
     b.add_argument("--no-yahoo", action="store_true", help="skip the Yahoo cross-check")
     sub.add_parser("peers")
     sub.add_parser("check")
+    sub.add_parser("variants")
     ag = sub.add_parser("agent")
     ag.add_argument("--no-push", action="store_true", help="write the dashboard JSON locally only")
     ag.add_argument("--show", choices=["paper", "backtest"], default="paper",
@@ -143,6 +158,8 @@ def main():
         _write(os.path.join(CACHE_DIR, universe.FOCUS, "peers.json"), rows)
     elif args.cmd == "check":
         cmd_check()
+    elif args.cmd == "variants":
+        cmd_variants()
     elif args.cmd == "agent":
         cmd_agent(push=not args.no_push, show=args.show)
 

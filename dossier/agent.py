@@ -45,6 +45,14 @@ REACTION_CUT = E.REACTION_CUT
 SLIPPAGE_BPS = 5.0
 POLICY = "Dossier Agent v1"
 
+# Rule variants, fixed on 27 September 2026 BEFORE they were tested
+# (see `variant_study`). Textbook defaults, not tuned:
+STOP_ATR = 3.0          # chandelier exit: highest close of 22 sessions - 3 x ATR(22)
+PULLBACK_DAYS = 4       # top up on the 4th down day in a row ...
+PULLBACK_ADD = 0.25     # ... by 25% of equity, capped at 100% invested ...
+PULLBACK_HOLD = 21      # ... and trim back to the base position after 21 sessions
+SMART_MIN_WAIT = 5      # smart re-entry: at least 5 sessions, then first close above the 20-day average
+
 
 # ------------------------------------------------------------------ costs
 
@@ -110,6 +118,13 @@ def inputs(symbol=universe.FOCUS):
     known["revenue_yoy"] = growth.ffill()
     known["growth_note"] = growth_note.replace("", np.nan).ffill().fillna("no results published yet")
     known["vol63"] = np.log(bars["Close"]).diff().rolling(63).std() * math.sqrt(252)
+    # Price context for the rule variants (all known at the close).
+    c = bars["Close"]
+    prev = c.shift(1)
+    tr = pd.concat([bars["High"] - bars["Low"], (bars["High"] - prev).abs(), (bars["Low"] - prev).abs()], axis=1).max(axis=1)
+    known["sma20"] = c.rolling(20).mean()
+    known["chandelier"] = c.rolling(22).max() - STOP_ATR * tr.rolling(22).mean()
+    known["down_streak"] = feats["down_streak"]
     return bars, known
 
 
@@ -122,6 +137,9 @@ class Config:
     use_exits: bool = True
     vol_target: bool = True
     growth_filter: bool = True
+    stop: bool = False            # variant 1: chandelier price stop, re-enter above the 20-day average
+    pullback: bool = False        # variant 2: top up on pullbacks while the business is healthy
+    smart_reentry: bool = False   # variant 3: re-enter on recovery instead of a fixed 21-session wait
 
 
 @dataclass
@@ -130,6 +148,9 @@ class Book:
     shares: int = 0
     entry: dict = None
     cool_until: int = -1
+    wait_recover: bool = False
+    topup_until: int = -1
+    base_shares: int = 0
     pending: dict = None
     trades: list = field(default_factory=list)
     decisions: list = field(default_factory=list)
@@ -139,6 +160,7 @@ class Book:
 def _decide(cfg, i, day, bars, known, book):
     """Stance at day's close -> an order for the next open (or None)."""
     k = known.loc[day]
+    close = float(bars.at[day, "Close"])
     reasons = []
     bad = cfg.use_exits and (bool(k["weak_results"]) or bool(k["profit_decline"]))
     if bad:
@@ -147,17 +169,44 @@ def _decide(cfg, i, day, bars, known, book):
     reasons.append(f"Business: {k['growth_note']}" + ("" if growth_ok else " (not growing)"))
     cooling = cfg.use_exits and i <= book.cool_until
 
+    def after_bad():
+        if cfg.smart_reentry:
+            book.cool_until, book.wait_recover = i + SMART_MIN_WAIT, True
+        else:
+            book.cool_until = i + COOL_OFF
+
     if book.shares > 0:
         if bad or not growth_ok:
             if bad:
-                book.cool_until = i + COOL_OFF
+                after_bad()
+            book.topup_until = -1
             return {"side": "sell", "reason": " | ".join(reasons)}, "exit"
+        if cfg.stop and not np.isnan(k["chandelier"]) and close < k["chandelier"]:
+            book.wait_recover, book.topup_until = True, -1
+            reasons.append(f"Price stop: close {close:,.2f} below {k['chandelier']:,.2f} "
+                           f"(22-session high minus {STOP_ATR:g} x ATR)")
+            return {"side": "sell", "reason": " | ".join(reasons)}, "exit"
+        if cfg.pullback:
+            if book.topup_until >= 0 and i >= book.topup_until:
+                book.topup_until = -1
+                extra = book.shares - book.base_shares
+                if extra > 0:
+                    return {"side": "trim", "shares": extra,
+                            "reason": f"Pullback top-up held {PULLBACK_HOLD} sessions; trim back to the base position"}, "trim"
+            elif book.topup_until < 0 and k["down_streak"] == PULLBACK_DAYS:
+                book.topup_until = i + PULLBACK_HOLD
+                return {"side": "add", "weight": PULLBACK_ADD,
+                        "reason": " | ".join(reasons + [f"{PULLBACK_DAYS} down days in a row while healthy: add "
+                                                         f"{PULLBACK_ADD:.0%} of equity"])}, "add"
         return None, "hold"
 
     if bad:
-        book.cool_until = i + COOL_OFF
+        after_bad()
     if cooling or bad:
-        reasons.append(f"Cooling off after bad results until session {book.cool_until - i} from now")
+        reasons.append(f"Cooling off after bad results for {book.cool_until - i} more sessions")
+        return None, "wait"
+    if book.wait_recover and not (not np.isnan(k["sma20"]) and close > k["sma20"]):
+        reasons.append("Waiting for a close above the 20-day average before buying back")
         return None, "wait"
     if not growth_ok:
         return None, "wait"
@@ -165,6 +214,7 @@ def _decide(cfg, i, day, bars, known, book):
     if np.isnan(vol):
         reasons.append("Not enough history for sizing yet")
         return None, "wait"
+    book.wait_recover = False
     weight = min(1.0, TARGET_VOL / vol) if cfg.vol_target else 1.0
     reasons.append(f"Size {weight:.0%} of equity (63-day volatility {vol:.0%}, target {TARGET_VOL:.0%})"
                    if cfg.vol_target else "Size 100% of equity")
@@ -183,8 +233,38 @@ def _fill(order, day, bars, book, cfg_id):
         cost = charges(value, "buy")
         book.cash -= value + cost
         book.costs += cost
-        book.shares = shares
+        book.shares = book.base_shares = shares
         book.entry = {"time": day, "price": px, "shares": shares, "cost": cost, "reason": order["reason"]}
+    elif order["side"] == "add":
+        equity = book.cash + book.shares * px
+        room = min(order["weight"] * equity, equity - book.shares * px, book.cash)
+        add = int(max(0.0, room) // (px * (1 + 0.003)))
+        if add <= 0:
+            return
+        value = add * px
+        cost = charges(value, "buy")
+        book.cash -= value + cost
+        book.costs += cost
+        e = book.entry
+        e["price"] = (e["price"] * e["shares"] + value) / (e["shares"] + add)
+        e["shares"] += add
+        e["cost"] += cost
+        book.shares += add
+    elif order["side"] == "trim":
+        q = min(order["shares"], book.shares)
+        e = book.entry
+        value = q * px
+        cost = charges(value, "sell")
+        buy_cost = e["cost"] * q / e["shares"]
+        pnl = value - cost - (q * e["price"] + buy_cost)
+        book.cash += value - cost
+        book.costs += cost
+        book.trades.append({"entry_time": e["time"], "entry_price": e["price"], "exit_time": day, "exit_price": px,
+                            "shares": q, "pnl": pnl, "pnl_pct": 100 * pnl / (q * e["price"]),
+                            "entry_reason": e["reason"], "exit_reason": order["reason"], "config": cfg_id})
+        e["shares"] -= q
+        e["cost"] -= buy_cost
+        book.shares -= q
     else:
         value = book.shares * px
         cost = charges(value, "sell")
@@ -255,7 +335,7 @@ def backtest():
     bars, known = inputs()
     start = known["vol63"].first_valid_index()
     out, books = [], {}
-    for cfg in CONFIGS:
+    for cfg in CONFIGS + VARIANTS[1:]:
         book, eq = simulate(cfg, bars, known, start)
         exposure = _exposure(book, eq)
         m = metrics(eq, book, bars)
@@ -335,3 +415,52 @@ def paper_run():
     with open(PAPER_FILE, "w") as f:
         json.dump(state, f, indent=2, default=str)
     return bars, known, book, eq, state, prev
+
+
+# ------------------------------------------------------------------ variant study
+
+VARIANTS = [
+    Config("A", "A. Current agent (baseline)"),
+    # Ids D-F so the dashboard's equity chart gives each its own colour.
+    Config("D", "D. Variant 1 (REJECTED): A + price stop (chandelier 22 / 3 x ATR), buy back above the 20-day average", stop=True),
+    Config("E", "E. Variant 2 (REJECTED): A + pullback top-up on the 4th down day while healthy", pullback=True),
+    Config("F", "F. Variant 3 (REJECTED): A + smart re-entry, buy back on a close above the 20-day average", smart_reentry=True),
+]
+KEEP_RULE = ("A variant is kept only if it raises the Sharpe ratio on the focus stock AND on at least 7 of "
+             "the 10 peers, and the peers' median max drawdown is no deeper than the baseline's.")
+
+
+def variant_study(symbols=None):
+    """Run every variant on the focus stock and each peer (same rules, each stock's
+    own data). Returns {symbol: {config_id: metrics}} and the verdict per variant."""
+    symbols = symbols or [universe.FOCUS] + universe.PEERS
+    table = {}
+    for s in symbols:
+        try:
+            bars, known = inputs(s)
+        except Exception as e:     # a stock without results data cannot be traded by this policy
+            table[s] = {"error": f"{type(e).__name__}: {e}"}
+            continue
+        start = known["vol63"].first_valid_index()
+        row = {}
+        for cfg in VARIANTS:
+            book, eq = simulate(cfg, bars, known, start)
+            m = metrics(eq, book, bars)
+            m["exposure_pct"] = _exposure(book, eq)
+            row[cfg.id] = m
+        close = bars["Close"].loc[start:]
+        row["HOLD"] = _bench_metrics(CAPITAL * close / close.iloc[0])
+        table[s] = row
+
+    peers = [s for s in symbols if s != universe.FOCUS and "error" not in table[s]]
+    verdicts = {}
+    for cfg in VARIANTS[1:]:
+        focus_up = table[universe.FOCUS][cfg.id]["sharpe"] > table[universe.FOCUS]["A"]["sharpe"]
+        peer_up = sum(table[s][cfg.id]["sharpe"] > table[s]["A"]["sharpe"] for s in peers)
+        dd_base = float(np.median([table[s]["A"]["max_drawdown_pct"] for s in peers]))
+        dd_var = float(np.median([table[s][cfg.id]["max_drawdown_pct"] for s in peers]))
+        keep = focus_up and peer_up >= 7 and dd_var >= dd_base
+        verdicts[cfg.id] = {"name": cfg.name, "focus_sharpe_up": bool(focus_up), "peers_sharpe_up": int(peer_up),
+                            "peers": len(peers), "peer_median_dd_base": dd_base, "peer_median_dd_variant": dd_var,
+                            "keep": bool(keep)}
+    return table, verdicts

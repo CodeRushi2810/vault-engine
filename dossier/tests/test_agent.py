@@ -57,5 +57,43 @@ class Charges(unittest.TestCase):
         self.assertAlmostEqual(A.round_trip_pct(1e5), 0.3854, places=3)
 
 
+
+class Variants(unittest.TestCase):
+    def _with_price_context(self, bars, known):
+        known["sma20"] = bars["Close"].rolling(20, min_periods=1).mean()
+        known["chandelier"] = np.nan
+        known["down_streak"] = 0
+        return known
+
+    def test_price_stop_sells_and_waits_for_recovery(self):
+        bars, known = _market()
+        known = self._with_price_context(bars, known)
+        known.iloc[10, known.columns.get_loc("chandelier")] = 1e9     # force the stop on day 10
+        cfg = A.Config("t", "t", stop=True)
+        book, _ = A.simulate(cfg, bars, known, bars.index[0])
+        self.assertEqual(book.trades[0]["exit_time"], bars.index[11])
+        self.assertIn("Price stop", book.trades[0]["exit_reason"])
+
+    def test_pullback_adds_then_trims_after_hold(self):
+        bars, known = _market()
+        known = self._with_price_context(bars, known)
+        known.iloc[5, known.columns.get_loc("down_streak")] = A.PULLBACK_DAYS
+        cfg = A.Config("t", "t", pullback=True)
+        book, _ = A.simulate(cfg, bars, known, bars.index[0])
+        trim = [t for t in book.trades if t["exit_reason"].startswith("Pullback")]
+        self.assertEqual(len(trim), 1)
+        self.assertEqual(trim[0]["exit_time"], bars.index[5 + A.PULLBACK_HOLD + 1])
+        self.assertEqual(book.shares, book.base_shares)
+
+    def test_smart_reentry_waits_min_sessions(self):
+        bars, known = _market(bad_on=10)
+        known = self._with_price_context(bars, known)
+        cfg = A.Config("t", "t", smart_reentry=True)
+        book, _ = A.simulate(cfg, bars, known, bars.index[0])
+        reentry = bars.index.get_loc(book.entry["time"])
+        self.assertGreater(reentry, 10 + A.SMART_MIN_WAIT)
+        self.assertLess(reentry, 10 + A.COOL_OFF)      # sooner than the fixed wait on a rising price
+
+
 if __name__ == "__main__":
     unittest.main()

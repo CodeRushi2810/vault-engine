@@ -117,7 +117,9 @@ def backtest_block(bars, start, results, bench, dossier):
         cfg, m, book = o["cfg"], o["metrics"], o["book"]
         reasons = {}
         for t in book.trades:
-            key = "bad results" if t["exit_reason"].startswith("Bad results") else "business stopped growing"
+            r = t["exit_reason"]
+            key = ("bad results" if r.startswith("Bad results") else "price stop" if "Price stop" in r
+                   else "pullback trim" if r.startswith("Pullback") else "business stopped growing")
             reasons[key] = reasons.get(key, 0) + 1
         monthly = {}
         for t in book.trades:
@@ -132,6 +134,22 @@ def backtest_block(bars, start, results, bench, dossier):
                            "equity": _weekly(bench[key])})
 
     a = results[0]["metrics"]
+    study_notes = []
+    study_path = os.path.join(CACHE_DIR, universe.FOCUS, "variant_study.json")
+    if os.path.exists(study_path):
+        with open(study_path) as f:
+            study = json.load(f)
+        for vid, v in study["verdicts"].items():
+            study_notes.append(f"{v['name'].split(':')[0]}: {'kept' if v['keep'] else 'rejected'} by the rule fixed before "
+                               f"testing (Sharpe up on {universe.FOCUS}: {'yes' if v['focus_sharpe_up'] else 'no'}; "
+                               f"on {v['peers_sharpe_up']} of {v['peers']} peers; peer median max drawdown "
+                               f"{v['peer_median_dd_base']:.0f}% -> {v['peer_median_dd_variant']:.0f}%).")
+        tab = study["table"]
+        peers = [s_ for s_ in tab if s_ != universe.FOCUS and "error" not in tab[s_]]
+        hold_beats = sum(tab[s_]["HOLD"]["total_return_pct"] > tab[s_]["A"]["total_return_pct"] for s_ in peers)
+        shallower = sum(tab[s_]["A"]["max_drawdown_pct"] > tab[s_]["HOLD"]["max_drawdown_pct"] for s_ in peers)
+        study_notes.append(f"Across the {len(peers)} peers, agent A's rules cut the worst drawdown on {shallower} "
+                           f"but earned less than simply holding on {hold_beats}: the exits work as insurance, at a cost.")
     control = benchmarks[0]["metrics"]["total_return_pct"]
     beats = all(o["metrics"]["total_return_pct"] < control for o in results)
     conclusion = (f"{A.POLICY} returned {a['total_return_pct']:.0f}% against {control:.0f}% for simply holding "
@@ -159,7 +177,7 @@ def backtest_block(bars, start, results, bench, dossier):
         "headline": {"control_beats_every_strategy": beats, "conclusion": conclusion,
                      "control_return_pct": control, "legacy_reported_return_pct": None,
                      "legacy_win_rate_pct": None, "legacy_hidden_open_unrealized": None},
-        "warnings": [
+        "warnings": study_notes + [
             "In-sample: the bad-results exit was found on 2023-2026 data that includes NETWEB's own results.",
             f"Only {a['trades']} completed trades; one avoided crash (January-February 2025) drives most of the risk improvement.",
             "The exit evidence is 'consistent, not yet confirmed': strong on the full sample and the same direction in both halves, but the earlier half alone is not significant.",
