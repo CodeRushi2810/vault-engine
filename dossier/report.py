@@ -357,7 +357,7 @@ def _price(d, sym):
 {_details("All market indices", "<p class=fine>“Moves with it” is how many percent the share tends to move for a 1% index move; “explained” is how much of its daily movement the index accounts for.</p>" + _table(["Index", "#Moves with it", "#On falling days", "#On rising days", "#Explained"], rrows))}"""
 
 
-def _agent(ag, sym):
+def _agent(ag, sym, worst=None):
     if not ag:
         return "<p class=muted>No agent run yet.</p>", None
     p, bt = ag["paper"], ag["backtest"]
@@ -407,6 +407,9 @@ def _agent(ag, sym):
         if dd_i < best:
             best, peak_i, trough_i = dd_i, run_max, i
     peak_day, trough_day = hold_eq[peak_i][0], hold_eq[trough_i][0]
+    if worst and worst.get("peak") and worst["peak"] >= bt["start"]:
+        # Same fall, dated by daily closes (matches the share-price tab).
+        peak_day, trough_day = worst["peak"], worst["trough"]
     sold_in_fall = any(t["status"] == "CLOSED" and peak_day <= t["exit"] <= trough_day for t in bt["trades"])
     dd_a, dd_h = abs(a["max_drawdown_pct"]), abs(hold["max_drawdown_pct"])
     if dd_a < dd_h - 5:
@@ -554,7 +557,8 @@ def render(dossier_path, panel):
     close = panel["Close"].dropna()
     dd = close / close.cummax() - 1
     company_html, revenue = _company(d, sym)
-    agent_html, equity = _agent(ag, sym)
+    eps = d["anatomy"]["drawdowns"].get("episodes_gt_10pct") or []
+    agent_html, equity = _agent(ag, sym, min(eps, key=lambda e: e["depth"]) if eps else None)
     research_html, conds, events = _research(d, sym)
     data = {"dates": [x.date().isoformat() for x in close.index], "close": [round(float(v), 2) for v in close.values],
             "dd": [round(float(v), 4) for v in dd.values], "revenue": revenue, "equity": equity,
