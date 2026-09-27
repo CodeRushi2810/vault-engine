@@ -20,7 +20,10 @@ Event families
   bought and sold the stock that day, almost always an HFT/prop desk).
   Bulk-deal lists are published after the close, so the deal date is the
   signal session.
-- Holdings: quarterly promoter stake changes, dated by NSE broadcast time.
+- Holdings: quarterly promoter, foreign-institution (FII) and domestic-
+  institution (DII) stake changes, dated by the original filing time
+  (dossier.sources.ownership). FII/DII thresholds were fixed at 1 percentage
+  point on 27 September 2026, before any FII/DII result was looked at.
 """
 import re
 from datetime import time as dtime
@@ -63,7 +66,12 @@ CATALOG = {
     "deal_net_sell": "Other directional bulk/block selling (non-institutional)",
     "promoter_cut": "Promoter stake falls by 0.5 percentage points or more in a quarter",
     "promoter_raise": "Promoter stake rises by 0.25 percentage points or more in a quarter",
+    "fii_raise": "Foreign institutions (FIIs) add 1 percentage point or more of the company in a quarter",
+    "fii_cut": "Foreign institutions (FIIs) cut 1 percentage point or more in a quarter",
+    "dii_raise": "Indian institutions (DIIs: mutual funds, insurers, ...) add 1 percentage point or more in a quarter",
+    "dii_cut": "Indian institutions (DIIs) cut 1 percentage point or more in a quarter",
 }
+INST_CUT = 1.0
 
 # Directional institutions. Arbitrage desks are excluded by name; HFT/prop
 # desks are removed by the round-trip filter.
@@ -201,11 +209,12 @@ def deals_for(pool, start):
 
 
 def holdings_for(symbol):
+    from dossier.sources.ownership import _published
     h = nse_api.company("holdings", symbol, refresh=False)
     rows = []
     for r in h:
         q = _ts(r.get("date"), "%d-%b-%Y")
-        ts = _ts(r.get("broadcastDate"), "%d-%b-%Y %H:%M:%S")
+        ts = _published(r)
         try:
             pct = float(r.get("pr_and_prgrp"))
         except (TypeError, ValueError):
@@ -225,6 +234,25 @@ def holdings_for(symbol):
     return pd.DataFrame(out, columns=["symbol", "cond", "ts", "change_pp"])
 
 
+def institutions_for(symbol):
+    """FII and DII stake changes of INST_CUT points or more between consecutive quarters."""
+    from dossier.sources import ownership
+    q = pd.DataFrame(ownership.quarterly(symbol, refresh=False))
+    out = []
+    for who in ("fii", "dii"):
+        if q.empty or q[who].isna().all():
+            continue
+        d = q.dropna(subset=[who, "published"])
+        for r, chg in zip(d.itertuples(), d[who].diff()):
+            if pd.isna(chg):
+                continue
+            if chg >= INST_CUT:
+                out.append({"symbol": symbol, "cond": f"{who}_raise", "ts": pd.Timestamp(r.published), "change_pp": chg})
+            elif chg <= -INST_CUT:
+                out.append({"symbol": symbol, "cond": f"{who}_cut", "ts": pd.Timestamp(r.published), "change_pp": chg})
+    return pd.DataFrame(out, columns=["symbol", "cond", "ts", "change_pp"])
+
+
 # ------------------------------------------------------------- study
 
 def refresh(log=print):
@@ -235,12 +263,13 @@ def refresh(log=print):
             nse_api.company(kind, s)
     nse_api.deals(universe.HISTORY_START)
     # New results filings and filing PDFs (only unseen ones are downloaded).
-    from dossier.sources import documents, financials
+    from dossier.sources import documents, financials, ownership
     for s in pool:
         financials.quarterly(s, refresh=True)
+        ownership.quarterly(s, refresh=False)   # holdings list was refreshed just above
         for doc in documents.wanted(s, s == universe.FOCUS):
             documents.text(doc)
-    log(f"Event data, financials and filings refreshed for {len(pool)} stocks")
+    log(f"Event data, financials, ownership and filings refreshed for {len(pool)} stocks")
 
 
 def study():
@@ -261,7 +290,7 @@ def study():
                               ["results_strong", "results_weak"], "results_muted")
             frames.append(res.assign(cond=label)[["symbol", "cond", "date"]])
 
-        for kind_df in (filings_for(s), holdings_for(s)):
+        for kind_df in (filings_for(s), holdings_for(s), institutions_for(s)):
             if len(kind_df):
                 kind_df = kind_df.assign(date=[reaction_session(t, sessions) for t in kind_df["ts"]]).dropna(subset=["date"])
                 frames.append(kind_df[["symbol", "cond", "date"]])

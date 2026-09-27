@@ -130,6 +130,8 @@ PLAIN_LABEL = {
     "inst_deal_buy": "A fund buys a large block of shares", "inst_deal_sell": "A fund sells a large block of shares",
     "deal_net_buy": "Another large block of shares bought", "deal_net_sell": "Another large block of shares sold",
     "promoter_cut": "Founders reduce their stake", "promoter_raise": "Founders increase their stake",
+    "fii_raise": "Foreign funds buy more of the company", "fii_cut": "Foreign funds sell part of their stake",
+    "dii_raise": "Indian funds buy more of the company", "dii_cut": "Indian funds sell part of their stake",
     "rev_accel": "Results: sales growth speeds up", "rev_decel": "Results: sales growth slows down",
     "margin_expand": "Results: profit margin widens", "margin_compress": "Results: profit margin narrows",
     "profit_decline": "Results: profit lower than a year earlier", "rating_upgrade": "Credit rating upgraded",

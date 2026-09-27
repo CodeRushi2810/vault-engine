@@ -9,6 +9,8 @@ import json
 import os
 from datetime import datetime
 
+import pandas as pd
+
 from dossier import universe
 from dossier.data import BASE_DIR, CACHE_DIR
 
@@ -53,7 +55,7 @@ def payload(symbol=None):
     """Everything the web report needs for one stock, as plain JSON."""
     symbol = symbol or universe.FOCUS
     from dossier.data import load_stocks
-    from dossier.sources import nse_api
+    from dossier.sources import nse_api, ownership
 
     folder = os.path.join(CACHE_DIR, symbol)
     with open(os.path.join(folder, "dossier.json")) as f:
@@ -82,8 +84,26 @@ def payload(symbol=None):
                    "results_profile": ev.get("results_profile"), "scorecard": ev.get("scorecard"),
                    "upcoming": ev.get("upcoming"), "recent": ev.get("focus_recent")},
         "agent": agent, "peers": peers, "indices": universe.INDICES,
+        "ownership": ownership.quarterly(symbol, refresh=False), "deals": _deals(symbol),
     }
     return _clean(doc)
+
+
+def _deals(symbol, days=730):
+    """The stock's bulk and block deals of the last two years, newest first, without
+    same-day round trips (trading desks that bought and sold the same shares)."""
+    from dossier.events import INSTITUTION, deals_for
+    _, d = deals_for([symbol], universe.HISTORY_START)
+    if d.empty:
+        return []
+    d = d[pd.to_datetime(d["Date"]) >= pd.Timestamp.today().normalize() - pd.Timedelta(days=days)]
+    # A trade big enough to be both is listed as a bulk AND a block deal: keep it once, as the block.
+    d = (d.sort_values("Kind").drop_duplicates(["Date", "Client", "Side", "Qty", "Price"])
+          .sort_values(["Date", "Qty"], ascending=[False, False]))
+    return [{"date": pd.Timestamp(r.Date).date().isoformat(), "client": r.ClientName.strip(), "side": r.Side.upper(),
+             "qty": int(r.Qty), "price": float(r.Price), "value": float(r.Qty * r.Price),
+             "kind": getattr(r, "Kind", None), "institution": bool(INSTITUTION.search(r.ClientName))}
+            for r in d.itertuples()]
 
 
 def publish_data(symbol=None):
