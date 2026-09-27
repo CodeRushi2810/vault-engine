@@ -4,11 +4,15 @@
     python -m dossier.run build NETWEB     # study one stock; writes dossier.json and report.html
     python -m dossier.run peers            # peer co-movement screen
     python -m dossier.run check            # audit + Yahoo cross-check for the whole universe
+    python -m dossier.run agent            # backtest + advance the paper ledger + push to the dashboard
+    python -m dossier.run agent --no-push  # same, but only write the dashboard JSON locally
 """
 import argparse
 import json
 import os
 from datetime import datetime
+
+import pandas as pd
 
 from dossier import anatomy, universe
 from dossier.data import CACHE_DIR, audit, build_panel, load_stocks, reconcile, sync
@@ -62,6 +66,48 @@ def cmd_check():
     _write(os.path.join(CACHE_DIR, "data_check.json"), report)
 
 
+def cmd_agent(push):
+    from dossier import agent, dashboard
+
+    dossier_path = os.path.join(CACHE_DIR, universe.FOCUS, "dossier.json")
+    if not os.path.exists(dossier_path):
+        raise SystemExit("Run `python -m dossier.run build` first; the agent reads the dossier's evidence.")
+    with open(dossier_path) as f:
+        dossier = json.load(f)
+
+    bars, known, start, results, bench = agent.backtest()
+    _, _, paper_book, paper_eq, state, prev = agent.paper_run()
+
+    print()
+    print(f"Backtest {start.date()} to {bars.index[-1].date()} (in-sample; costs included)")
+    rows = [(o["cfg"].id, o["metrics"]) for o in results] + [(k, agent._bench_metrics(v)) for k, v in bench.items()]
+    for key, m in rows:
+        print(f"  {key:<8} return {m['total_return_pct']:>7.1f}%  CAGR {m['cagr_pct']:>6.1f}%  "
+              f"max DD {m['max_drawdown_pct']:>6.1f}%  Sharpe {m['sharpe']:.2f}  trades {m.get('trades') if m.get('trades') is not None else '-'}")
+
+    last = state["decisions"][-1] if state["decisions"] else None
+    print()
+    print(f"Paper ledger ({agent.POLICY}) since {pd.Timestamp(state['start']).date()}: "
+          f"equity ₹{state['equity']:,.0f}, cash ₹{state['cash']:,.0f}, shares {state['shares']}")
+    for t in paper_book.trades:
+        print(f"  closed {t['entry_time'].date()} -> {t['exit_time'].date()}  {t['pnl_pct']:+.1f}%")
+    if last:
+        order = state.get("pending")
+        print()
+        print(f"Decision at the close of {last['date']}: {last['stance'].upper()}")
+        if order:
+            px = float(bars["Close"].iloc[-1])
+            est = int(state["cash"] * order.get("weight", 0) // (px * 1.003)) if order["side"] == "buy" else state["shares"]
+            print(f"  Order for the next open: {order['side'].upper()} about {est} shares (last close ₹{px:,.2f})")
+        print(f"  Why: {(last['reason'] or '').replace(' | ', chr(10) + '       ') or 'no change'}")
+
+    data = dashboard.payload(bars, start, results, bench, paper_book, dossier)
+    _write(os.path.join(CACHE_DIR, universe.FOCUS, "dashboard_payload.json"), data)
+    if push:
+        backup = dashboard.push(data)
+        print(f"Pushed to MongoDB vault_db.dashboard_snapshot (previous snapshot saved to {backup})")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="python -m dossier.run")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -71,6 +117,8 @@ def main():
     b.add_argument("--no-yahoo", action="store_true", help="skip the Yahoo cross-check")
     sub.add_parser("peers")
     sub.add_parser("check")
+    ag = sub.add_parser("agent")
+    ag.add_argument("--no-push", action="store_true", help="write the dashboard JSON locally only")
     args = ap.parse_args()
 
     if args.cmd == "sync":
@@ -92,6 +140,8 @@ def main():
         _write(os.path.join(CACHE_DIR, universe.FOCUS, "peers.json"), rows)
     elif args.cmd == "check":
         cmd_check()
+    elif args.cmd == "agent":
+        cmd_agent(push=not args.no_push)
 
 
 if __name__ == "__main__":
