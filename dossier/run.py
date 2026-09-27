@@ -4,9 +4,9 @@
     python -m dossier.run build NETWEB     # study one stock; writes dossier.json and report.html
     python -m dossier.run peers            # peer co-movement screen
     python -m dossier.run check            # audit + Yahoo cross-check for the whole universe
-    python -m dossier.run agent            # backtest + advance the paper ledger + push to the dashboard
-    python -m dossier.run agent --no-push  # same, but only write the dashboard JSON locally
-    python -m dossier.run agent --show backtest  # dashboard trades show the backtest account instead
+    python -m dossier.run agent            # backtest + advance the paper ledger; updates report.html
+    python -m dossier.run agent --push     # same, and also push to the Next.js dashboard (MongoDB)
+    python -m dossier.run agent --push --show backtest  # dashboard trades show the backtest account instead
     python -m dossier.run variants         # test the pre-registered rule variants on NETWEB + peers
 """
 import argparse
@@ -103,6 +103,10 @@ def cmd_agent(push, show="paper"):
             print(f"  Order for the next open: {order['side'].upper()} about {est} shares (last close ₹{px:,.2f})")
         print(f"  Why: {(last['reason'] or '').replace(' | ', chr(10) + '       ') or 'no change'}")
 
+    _write(agent.AGENT_FILE, agent.report_data(bars, start, results, bench, paper_book, paper_eq, state))
+    from dossier import report
+    report.render(dossier_path, bars)
+
     data = dashboard.payload(bars, start, results, bench, paper_book, dossier, show=show)
     _write(os.path.join(CACHE_DIR, universe.FOCUS, "dashboard_payload.json"), data)
     if push:
@@ -134,7 +138,7 @@ def main():
     sub.add_parser("check")
     sub.add_parser("variants")
     ag = sub.add_parser("agent")
-    ag.add_argument("--no-push", action="store_true", help="write the dashboard JSON locally only")
+    ag.add_argument("--push", action="store_true", help="also push to the Next.js dashboard (MongoDB)")
     ag.add_argument("--show", choices=["paper", "backtest"], default="paper",
                     help="which Rs 10 lakh book the dashboard's trades show (default: the paper ledger)")
     args = ap.parse_args()
@@ -161,7 +165,7 @@ def main():
     elif args.cmd == "variants":
         cmd_variants()
     elif args.cmd == "agent":
-        cmd_agent(push=not args.no_push, show=args.show)
+        cmd_agent(push=args.push, show=args.show)
 
 
 if __name__ == "__main__":

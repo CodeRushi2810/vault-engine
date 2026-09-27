@@ -92,6 +92,13 @@ def render(dossier_path, panel):
     w = d.get("what_happens_when") or {"results": [], "now": {"active": []}, "method": {}}
     sym = d["symbol"]
 
+    agent_path = os.path.join(os.path.dirname(dossier_path), "agent.json")
+    agent_data = None
+    if os.path.exists(agent_path):
+        with open(agent_path) as f:
+            agent_data = json.load(f)
+    agent_html, agent_series = _agent_html(agent_data)
+
     close = panel["Close"].dropna()
     dd = close / close.cummax() - 1
     series = {
@@ -172,7 +179,7 @@ def render(dossier_path, panel):
     page = TEMPLATE.format(
         sym=_esc(sym), as_of=_d(as_of), generated=_d(d["generated_at"][:10]),
         first=_d(d["history"]["first"]), bars=d["history"]["bars"],
-        headline=headline, tiles=tiles_html, fwd_rows=fwd_rows, rel_rows=rel_rows,
+        headline=headline, tiles=tiles_html, fwd_rows=fwd_rows, rel_rows=rel_rows, agent=agent_html,
         peer_rows=peer_rows or "<tr><td colspan=6 class=muted>Run <code>python -m dossier.run peers</code>.</td></tr>",
         now_rows=now_rows, issue_rows=issue_rows, yahoo_line=yahoo_line, ca_line=ca_line,
         pool=", ".join(m.get("pool", [])), val_start=_d(m.get("validation_start")), tests=m.get("tests", "—"),
@@ -181,7 +188,7 @@ def render(dossier_path, panel):
         legend=LEGEND, ev_tiles=events_html["tiles"], ev_table=events_html["table"], ev_upcoming=events_html["upcoming"],
         ev_recent=events_html["recent"], ev_tests=events_html["tests"], ev_cut=events_html["cut"],
         scorecard=score_html,
-        data=json.dumps({"series": series, "conds": cond_rows, "events": event_rows, "revenue": revenue_series}),
+        data=json.dumps({"series": series, "conds": cond_rows, "events": event_rows, "revenue": revenue_series, "agent": agent_series}),
     )
     out = os.path.join(os.path.dirname(dossier_path), "report.html")
     with open(out, "w", encoding="utf-8") as f:
@@ -199,6 +206,113 @@ def _rows(results):
         "nw_n": r["netweb"].get("n"), "nw_est": r["netweb_estimate"], "raw": r["pooled_raw"].get("mean"),
         "hit": r["pooled"].get("hit_rate"), "baseline": r.get("baseline"),
     } for r in results]
+
+
+def _inr(x):
+    """Indian digit grouping: 5904417 -> '59,04,417'."""
+    if x is None:
+        return "—"
+    neg, n = x < 0, f"{abs(x):.0f}"
+    head, tail = n[:-3], n[-3:]
+    while len(head) > 2:
+        tail = head[-2:] + "," + tail
+        head = head[:-2]
+    s = (head + "," + tail) if head else tail
+    return ("−₹" if neg else "₹") + s
+
+
+def _agent_html(ag):
+    """The trading agent section: paper ledger first, then the backtest."""
+    if not ag:
+        return ("<h2>Trading agent</h2><div class='card'><p class=muted>No agent run yet. Run "
+                "<code>python -m dossier.run agent</code> after the close.</p></div>"), None
+    p, bt = ag["paper"], ag["backtest"]
+    cap = ag["capital"]
+    ret = p["equity"] / cap - 1
+    last = p["decisions"][-1] if p["decisions"] else {}
+    stance = (last.get("stance") or "—").upper()
+    pend = p.get("pending")
+    pos = p.get("open")
+    order_txt = "No order"
+    if pend:
+        if pend["side"] == "buy":
+            order_txt = f"BUY at the next open, about {pend['weight']:.0%} of the account"
+        elif pend["side"] == "add":
+            order_txt = f"ADD {pend['weight']:.0%} of the account at the next open"
+        elif pend["side"] == "trim":
+            order_txt = f"TRIM {pend['shares']} shares at the next open"
+        else:
+            order_txt = "SELL everything at the next open"
+    tiles = [
+        ("Paper account value", _inr(p["equity"]), f"{ret:+.1%} vs the {_inr(cap)} start"),
+        ("Cash", _inr(p["cash"]), f"{p['cash'] / p['equity']:.0%} of the account"),
+        ("Position", f"{pos['shares']} shares" if pos else "None",
+         f"bought at ₹{pos['entry_price']:,.2f} · {_inr(pos['pnl'])} ({pos['pnl_pct']:+.1f}%)" if pos else "flat"),
+        (f"Decision at the close of {_d(last.get('date'))}", stance, order_txt),
+    ]
+    tiles_html = "".join(f'<div class="tile"><div class="tl">{_esc(l)}</div><div class="tv">{_esc(v)}</div>'
+                         f'<div class="ts">{_esc(s)}</div></div>' for l, v, s in tiles)
+    why = [w for w in ((pend or {}).get("reason") or last.get("reason") or "").split(" | ") if w]
+    why_html = "".join(f"<li>{_esc(w)}</li>" for w in why) or "<li class=muted>No change: holding, no new signal.</li>"
+
+    def trade_rows(rows, reasons=True):
+        out = ""
+        for t in reversed(rows):
+            cls = "pos" if t["pnl"] > 0 else "neg"
+            out += (f"<tr><td>{'<b>Open</b>' if t['status'] == 'OPEN' else 'Closed'}</td>"
+                    f"<td>{_d(t['entry'])}</td><td class=n>₹{t['entry_price']:,.2f}</td>"
+                    f"<td>{'—' if t['status'] == 'OPEN' else _d(t['exit'])}</td>"
+                    f"<td class=n>₹{t['exit_price']:,.2f}{' <span class=muted>(now)</span>' if t['status'] == 'OPEN' else ''}</td>"
+                    f"<td class=n>{t['shares']:,}</td><td class='n {cls}'>{_inr(t['pnl'])}</td>"
+                    f"<td class='n {cls}'>{t['pnl_pct']:+.1f}%</td>"
+                    + (f"<td class=why>{_esc(t['exit_reason'].split(' | ')[0]) if t['exit_reason'] else '<span class=muted>still held</span>'}</td>" if reasons else "")
+                    + "</tr>")
+        return out
+
+    head = ("<tr><th>Status</th><th>Bought</th><th class=n>Price</th><th>Sold</th><th class=n>Price</th>"
+            "<th class=n>Shares</th><th class=n>P&amp;L</th><th class=n>%</th><th>Why it sold</th></tr>")
+    paper_rows = trade_rows(p["trades"] + ([pos] if pos else []))
+    if not paper_rows:
+        paper_rows = (f"<tr><td colspan=9 class=muted>No fills yet. The paper account started on {_d(p['start'])}; "
+                      "orders fill at the next session's open, the next time the agent runs.</td></tr>")
+    log = "".join(f"<tr><td>{_d(x['date'])}</td><td>{_esc((x['stance'] or '').upper())}</td>"
+                  f"<td>{_esc((x['order'] or '—').upper())}</td><td class=why>{_esc((x['reason'] or '').replace(' | ', ' · '))}</td></tr>"
+                  for x in reversed(p["decisions"]))
+
+    rows = [(c["id"], c["name"], c["metrics"]) for c in bt["configs"]] + [(b["id"], b["name"], b["metrics"]) for b in bt["benchmarks"]]
+    cfg_rows = "".join(
+        f"<tr{' class=hl' if i == 'A' else ''}><td><b>{_esc(i)}</b></td><td>{_esc(n.split('. ', 1)[-1])}</td>"
+        f"<td class=n>{m['total_return_pct']:+.0f}%</td><td class=n>{m['cagr_pct']:.0f}%</td>"
+        f"<td class=n>{m['max_drawdown_pct']:.0f}%</td><td class=n>{m['sharpe']:.2f}</td>"
+        f"<td class=n>{m.get('trades') if m.get('trades') is not None else '—'}</td>"
+        f"<td class=n>{_inr(cap * (1 + m['total_return_pct'] / 100))}</td></tr>"
+        for i, n, m in rows)
+    verdicts = ""
+    if ag.get("variants"):
+        verdicts = "".join(
+            f"<li><b>{_esc(v['name'].split(':')[0])}</b>: {'kept' if v['keep'] else 'rejected'}. "
+            f"Sharpe up on the focus stock: {'yes' if v['focus_sharpe_up'] else 'no'}; on {v['peers_sharpe_up']} of "
+            f"{v['peers']} peers; peers' median worst drawdown {v['peer_median_dd_base']:.0f}% → {v['peer_median_dd_variant']:.0f}%.</li>"
+            for v in ag["variants"]["verdicts"].values())
+        verdicts = (f"<div class='card'><p><b>Rule variants tested</b> <span class=muted>({_esc(ag['variants']['keep_rule'])})</span></p>"
+                    f"<ul>{verdicts}</ul></div>")
+
+    html_ = f"""<h2>Trading agent: paper account</h2>
+<p class="sub">{_esc(ag['policy'])} · paper trading since {_d(p['start'])} · starts with {_inr(cap)} and grows only by its own profit. Run <code>python -m dossier.run agent</code> after the close; orders fill at the next open.</p>
+<div class="tiles">{tiles_html}</div>
+<div class="card"><p><b>Why</b></p><ul>{why_html}</ul></div>
+<div class="card scroll"><p><b>Paper trades</b></p><table>{head}{paper_rows}</table></div>
+<details><summary>Decision log (last {len(p['decisions'])} sessions)</summary><div class="card scroll"><table><tr><th>Close of</th><th>Stance</th><th>Order</th><th>Reasoning</th></tr>{log}</table></div></details>
+
+<h2>Trading agent: backtest</h2>
+<p class="sub">The same rules replayed from {_d(bt['start'])} to {_d(bt['end'])}, each account starting at {_inr(cap)}, net of charges (about {ag['costs_round_trip_pct_at_5L']:.2f}% per round trip at ₹5 lakh). In-sample: the exit rule was found on data that includes these events, so this does not prove the rule works; only the paper account above can.</p>
+<div class="legend"><span><i style="background:var(--series-1)"></i>A. Agent</span><span><i style="background:var(--series-2)"></i>Buy &amp; hold</span><span><i style="background:var(--series-3)"></i>Nifty 50</span></div>
+<div class="card"><div class="chart" id="agentEq"></div></div>
+<div class="card scroll"><table><tr><th></th><th>Config</th><th class=n>Return</th><th class=n>CAGR</th><th class=n>Worst drawdown</th><th class=n>Sharpe</th><th class=n>Trades</th><th class=n>₹10 lakh became</th></tr>{cfg_rows}</table></div>
+<div class="card scroll"><p><b>Backtest trades (config A)</b></p><table>{head}{trade_rows(bt['trades'])}</table></div>
+{verdicts}"""
+    series = {"A": bt["equity"]["A"], "CONTROL": bt["equity"]["CONTROL"], "NIFTY": bt["equity"]["NIFTY"]}
+    return html_, series
 
 
 def _cr(rupees, digits=0):
@@ -328,6 +442,7 @@ TEMPLATE = """<!doctype html>
   --surface-0:#f6f6f4; --surface-1:#fcfcfb; --line:#e4e3df; --grid:#ecebe7;
   --text-primary:#0b0b0b; --text-secondary:#52514e; --text-muted:#7a7975;
   --series-1:#2a78d6; --series-dd:#e34948; --wash-dd:rgba(227,73,72,.10); --wash-1:rgba(42,120,214,.10);
+  --series-2:#eb6834; --series-3:#1baf7a;
   --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b; --neutral:#a3a29c;
 }}
 @media (prefers-color-scheme: dark) {{
@@ -335,7 +450,7 @@ TEMPLATE = """<!doctype html>
     color-scheme: dark;
     --surface-0:#121211; --surface-1:#1a1a19; --line:#2c2c2a; --grid:#262624;
     --text-primary:#ffffff; --text-secondary:#c3c2b7; --text-muted:#8f8e86;
-    --series-1:#3987e5; --series-dd:#e66767; --wash-dd:rgba(230,103,103,.12); --wash-1:rgba(57,135,229,.12);
+    --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70; --series-dd:#e66767; --wash-dd:rgba(230,103,103,.12); --wash-1:rgba(57,135,229,.12);
     --neutral:#6f6e68;
   }}
 }}
@@ -391,6 +506,8 @@ tr.hl td {{ background:var(--wash-1); }}
 details summary {{ cursor:pointer; color:var(--text-secondary); margin-top:10px; }}
 ul {{ padding-left:20px; }} li {{ margin:4px 0; }}
 code {{ font-size:13px; }}
+td.pos {{ color:var(--good); }} td.neg {{ color:var(--critical); }}
+td.why {{ font-size:13px; color:var(--text-secondary); min-width:260px; }}
 </style></head>
 <body><main>
 <h1>{sym} Stock Dossier</h1>
@@ -400,6 +517,8 @@ code {{ font-size:13px; }}
 <p class="disclaimer">Research for paper trading only. This is not investment advice, and past behaviour does not guarantee future returns.</p></div>
 
 <div class="tiles">{tiles}</div>
+
+{agent}
 
 <h2>Price since listing</h2>
 <p class="sub">NSE closing price, adjusted for splits and bonuses. Log scale, so equal heights mean equal percentage moves.</p>
@@ -534,6 +653,44 @@ function lineChart(id, ys, opts) {{
   hit.addEventListener('mouseleave', () => {{ cross.setAttribute('visibility','hidden'); dot.setAttribute('visibility','hidden'); hideTip(); }});
 }}
 
+function equityChart(id, S) {{
+  const host = document.getElementById(id); if (!host || !S) return; host.innerHTML = '';
+  const keys = [['A', 'Agent', '--series-1'], ['CONTROL', 'Buy & hold', '--series-2'], ['NIFTY', 'Nifty 50', '--series-3']];
+  const dates = S.A.map(p => p[0]);
+  const val = {{}}; keys.forEach(([k]) => {{ val[k] = new Map(S[k].map(p => [p[0], p[1]])); }});
+  const W = host.clientWidth, H = 300, m = {{l:72, r:16, t:10, b:26}};
+  const svg = el('svg', {{viewBox:`0 0 ${{W}} ${{H}}`, height:H, role:'img', 'aria-label':'Equity: agent vs buy and hold vs Nifty 50'}}, host);
+  const all = keys.flatMap(([k]) => S[k].map(p => p[1]));
+  const lo = Math.log(Math.min(...all)), hi = Math.log(Math.max(...all));
+  const xs = i => m.l + (W - m.l - m.r) * i / (dates.length - 1);
+  const y = v => m.t + (H - m.t - m.b) * (1 - (Math.log(v) - lo) / (hi - lo));
+  const g = el('g', {{class:'axis'}}, svg);
+  [5e5, 1e6, 2e6, 5e6, 1e7, 2e7].forEach(t => {{ if (t < Math.exp(lo) * 0.9 || t > Math.exp(hi) * 1.1) return;
+    el('line', {{x1:m.l, x2:W-m.r, y1:y(t), y2:y(t), class:'gridline'}}, g);
+    el('text', {{x:m.l-8, y:y(t)+4, 'text-anchor':'end'}}, g).textContent = '₹' + (t >= 1e7 ? (t/1e7) + ' cr' : (t/1e5) + ' L'); }});
+  let lastYear = null;
+  dates.forEach((d, i) => {{ const yr = d.slice(0, 4); if (yr !== lastYear) {{ lastYear = yr;
+    if (i > 0) el('text', {{x:xs(i), y:H-6, 'text-anchor':'middle'}}, g).textContent = yr; }} }});
+  keys.forEach(([k, label, c]) => {{
+    const pts = dates.map((d, i) => [xs(i), val[k].get(d)]).filter(p => p[1] != null);
+    el('path', {{d: pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + y(p[1]).toFixed(1)).join(''), fill:'none',
+      stroke:css(c), 'stroke-width':2, 'stroke-linejoin':'round', 'stroke-linecap':'round'}}, svg);
+    const [lx, lv] = pts[pts.length - 1];
+    el('circle', {{cx:lx, cy:y(lv), r:4.5, fill:css(c), stroke:css('--surface-1'), 'stroke-width':2}}, svg);
+  }});
+  const cross = el('line', {{y1:m.t, y2:H-m.b, stroke:css('--text-muted'), 'stroke-width':1, visibility:'hidden'}}, svg);
+  const hit = el('rect', {{x:m.l, y:0, width:W-m.l-m.r, height:H, fill:'transparent'}}, svg);
+  const inr = v => '₹' + Math.round(v).toLocaleString('en-IN');
+  hit.addEventListener('mousemove', e => {{
+    const r = svg.getBoundingClientRect(), px = (e.clientX - r.left) * W / r.width;
+    const i = Math.max(0, Math.min(dates.length - 1, Math.round((px - m.l) / (W - m.l - m.r) * (dates.length - 1))));
+    cross.setAttribute('x1', xs(i)); cross.setAttribute('x2', xs(i)); cross.setAttribute('visibility', 'visible');
+    showTip(host, xs(i) * r.width / W, m.t + 20, `<b>Week of ${{fmtDate(dates[i])}}</b>` +
+      keys.map(([k, label]) => `<br>${{label}}: ${{val[k].has(dates[i]) ? inr(val[k].get(dates[i])) : '—'}}`).join(''));
+  }});
+  hit.addEventListener('mouseleave', () => {{ cross.setAttribute('visibility', 'hidden'); hideTip(); }});
+}}
+
 function barChart(id, rows) {{
   const host = document.getElementById(id); host.innerHTML = '';
   const W = host.clientWidth, H = 220, m = {{l:64, r:10, t:12, b:28}};
@@ -616,6 +773,7 @@ function drawAll() {{
   condChart('conds', D.conds);
   condChart('events', D.events);
   if (D.revenue.length) barChart('revbars', D.revenue);
+  if (D.agent) equityChart('agentEq', D.agent);
 }}
 drawAll();
 let rt; window.addEventListener('resize', () => {{ clearTimeout(rt); rt = setTimeout(drawAll, 120); }});

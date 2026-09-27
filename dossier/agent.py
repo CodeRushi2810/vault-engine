@@ -99,7 +99,7 @@ def inputs(symbol=universe.FOCUS):
     for r in res.itertuples():
         if r.reaction_abn < -REACTION_CUT and r.reaction_session in known.index:
             known.at[r.reaction_session, "weak_results"] = True
-            known.at[r.reaction_session, "note"] += (f"Results {r.meeting.date()}: first reaction "
+            known.at[r.reaction_session, "note"] += (f"Results of {r.meeting:%d %B %Y}: first reaction "
                                                      f"{r.reaction_abn:+.1%} vs market. ")
     growth = pd.Series(np.nan, index=sessions)
     growth_note = pd.Series("", index=sessions, dtype=object)
@@ -111,10 +111,10 @@ def inputs(symbol=universe.FOCUS):
             continue
         if not np.isnan(r.pat_yoy) and r.pat_yoy < 0:
             known.at[s, "profit_decline"] = True
-            known.at[s, "note"] += f"Net profit {r.pat_yoy:+.0%} vs a year ago (quarter ended {r.period_end.date()}). "
+            known.at[s, "note"] += f"Net profit {r.pat_yoy:+.0%} vs a year ago (quarter ended {r.period_end:%d %B %Y}). "
         growth.loc[s] = r.revenue_yoy
         growth_note.loc[s] = (f"revenue {r.revenue_yoy:+.0%} vs a year ago" if not np.isnan(r.revenue_yoy)
-                              else "no year-ago quarter yet") + f" (quarter ended {r.period_end.date()})"
+                              else "no year-ago quarter yet") + f" (quarter ended {r.period_end:%d %B %Y})"
     known["revenue_yoy"] = growth.ffill()
     known["growth_note"] = growth_note.replace("", np.nan).ffill().fillna("no results published yet")
     known["vol63"] = np.log(bars["Close"]).diff().rolling(63).std() * math.sqrt(252)
@@ -464,3 +464,60 @@ def variant_study(symbols=None):
                             "peers": len(peers), "peer_median_dd_base": dd_base, "peer_median_dd_variant": dd_var,
                             "keep": bool(keep)}
     return table, verdicts
+
+
+# ------------------------------------------------------------------ report data
+
+AGENT_FILE = os.path.join(CACHE_DIR, universe.FOCUS, "agent.json")
+
+
+def _trade_json(t, status="CLOSED"):
+    return {"status": status, "entry": pd.Timestamp(t["entry_time"]).date().isoformat(),
+            "entry_price": float(t["entry_price"]), "exit": pd.Timestamp(t["exit_time"]).date().isoformat(),
+            "exit_price": float(t["exit_price"]), "shares": int(t["shares"]), "pnl": float(t["pnl"]),
+            "pnl_pct": float(t["pnl_pct"]), "entry_reason": t.get("entry_reason", ""), "exit_reason": t.get("exit_reason", "")}
+
+
+def _open_json(book, bars):
+    if not book.entry:
+        return None
+    e, px = book.entry, float(bars["Close"].iloc[-1])
+    pnl = book.shares * px - (e["shares"] * e["price"] + e["cost"])
+    return {"status": "OPEN", "entry": pd.Timestamp(e["time"]).date().isoformat(), "entry_price": float(e["price"]),
+            "exit": bars.index[-1].date().isoformat(), "exit_price": px, "shares": int(book.shares), "pnl": float(pnl),
+            "pnl_pct": float(100 * pnl / (e["shares"] * e["price"])), "entry_reason": e["reason"], "exit_reason": ""}
+
+
+def report_data(bars, start, results, bench, paper_book, paper_eq, state):
+    """Everything report.html shows about the agent, JSON-serialisable."""
+    def weekly(eq):
+        w = eq.resample("W-FRI").last().dropna()
+        if w.index[-1] != eq.index[-1]:
+            w.loc[eq.index[-1]] = eq.iloc[-1]
+        return [[d.date().isoformat(), round(float(v), 2)] for d, v in w.items()]
+
+    a = results[0]
+    study_path = os.path.join(CACHE_DIR, universe.FOCUS, "variant_study.json")
+    study = None
+    if os.path.exists(study_path):
+        with open(study_path) as f:
+            study = json.load(f)
+    return {
+        "policy": POLICY, "capital": CAPITAL, "as_of": bars.index[-1].date().isoformat(),
+        "paper": {
+            "start": pd.Timestamp(state["start"]).date().isoformat(), "equity": state["equity"], "cash": state["cash"],
+            "shares": state["shares"], "pending": state.get("pending"),
+            "open": _open_json(paper_book, bars), "trades": [_trade_json(t) for t in paper_book.trades],
+            "decisions": state.get("decisions", [])[-30:], "equity_curve": [[d.date().isoformat(), float(v)] for d, v in paper_eq.items()],
+        },
+        "backtest": {
+            "start": start.date().isoformat(), "end": bars.index[-1].date().isoformat(),
+            "configs": [{"id": o["cfg"].id, "name": o["cfg"].name, "metrics": o["metrics"]} for o in results],
+            "benchmarks": [{"id": k, "name": {"CONTROL": f"Buy & hold {universe.FOCUS}", "NIFTY": "Nifty 50"}[k],
+                            "metrics": _bench_metrics(v)} for k, v in bench.items()],
+            "equity": {"A": weekly(a["equity"]), "CONTROL": weekly(bench["CONTROL"]), "NIFTY": weekly(bench["NIFTY"])},
+            "trades": [_trade_json(t) for t in a["book"].trades] + ([_open_json(a["book"], bars)] if a["book"].entry else []),
+        },
+        "variants": study and {"keep_rule": study["keep_rule"], "verdicts": study["verdicts"]},
+        "costs_round_trip_pct_at_5L": round_trip_pct(5e5),
+    }
