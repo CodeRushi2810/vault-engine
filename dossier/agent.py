@@ -13,6 +13,10 @@ Policy v1 (fixed on 27 September 2026, before any backtest was run)
   100% of equity. This is risk control, not an edge.
 - Execution: decide on day t's close, fill at day t+1's open, with full
   NSE delivery charges and slippage.
+- Capital: every book (backtest configs and the paper ledger) starts with
+  CAPITAL (₹10 lakh) and never receives outside money. Position size is a
+  share of the book's current equity, so capital grows only by reinvested
+  profit and shrinks with losses.
 
 Honesty notes
 - The exit rules were found on data that includes NETWEB 2023-2026, so

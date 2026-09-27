@@ -47,17 +47,17 @@ def _trade_row(status, entry_time, entry_price, exit_time, exit_price, shares, s
     }
 
 
-def trades(bt_book, paper_book, bars):
-    """Backtest trades that closed before the paper start, then the paper ledger.
+def trades(paper_book, bars):
+    """The paper ledger only.
 
-    Dashboard P&L here is price P&L (as in core/run_pipeline.py); charges are
-    in the backtest metrics.
+    The dashboard computes cash as ₹10,00,000 + realised P&L - open cost
+    from this list, so it must hold the real paper book (which starts at
+    ₹10 lakh and grows only by its own P&L). Backtest trades live in the
+    `backtest` block; mixing them in here would add simulated profit to the
+    live capital. P&L is price P&L, as in core/run_pipeline.py.
     """
     last_px, last_day = float(bars["Close"].iloc[-1]), bars.index[-1]
     rows = []
-    for t in bt_book.trades:
-        rows.append(_trade_row("CLOSED", t["entry_time"], t["entry_price"], t["exit_time"], t["exit_price"],
-                               t["shares"], f"{A.POLICY} · backtest"))
     for t in paper_book.trades:
         rows.append(_trade_row("CLOSED", t["entry_time"], t["entry_price"], t["exit_time"], t["exit_price"],
                                t["shares"], f"{A.POLICY} · paper"))
@@ -153,6 +153,8 @@ def backtest_block(bars, start, results, bench, dossier):
             "The exit evidence is 'consistent, not yet confirmed': strong on the full sample and the same direction in both halves, but the earlier half alone is not significant.",
             "Single stock: the result depends on NETWEB having risen about 5x; a falling stock would look very different.",
             "Charges follow a delivery schedule with 5 bps slippage per side; confirm against a real contract note.",
+            f"Every config starts with ₹{A.CAPITAL / 1e5:.0f} lakh and only reinvests its own profits; no money is ever added.",
+            "The dashboard's trades and cash show the forward paper ledger only (also started at ₹10 lakh); these backtest trades are not in them.",
             "Dashboard trade P&L is price-only (as elsewhere on the dashboard); the metrics above are net of charges.",
         ],
     }
@@ -177,7 +179,7 @@ def payload(bars, start, results, bench, paper_book, dossier):
                      "net_pnl_mark_to_market": round(equity - A.CAPITAL, 2),
                      "return_on_initial_pct": round(100 * (equity / A.CAPITAL - 1), 3), "cash": round(paper_book.cash, 2),
                      "pending_order": paper_book.pending},
-        "trades": trades(results[0]["book"], paper_book, bars),
+        "trades": trades(paper_book, bars),
         "backtest": backtest_block(bars, start, results, bench, dossier),
         "market_data": {universe.FOCUS: float(bars["Close"].iloc[-1])},
         "prevClosePrices": {universe.FOCUS: {"prev_close": float(bars["Close"].iloc[-2])}},
