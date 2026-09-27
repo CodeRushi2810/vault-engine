@@ -1,0 +1,10 @@
+# Dependencies of the dossier package (kept separate from the root requirements.txt).
+pandas
+numpy
+scipy
+requests
+yfinance      # cross-check source only
+nselib        # NSE corporate actions
+growwapi      # live feed (sources/groww.py)
+pyotp
+python-dotenv
