@@ -1,11 +1,14 @@
 """The whole evening routine in one command. Run after about 6pm on trading days:
 
-    python -m dossier.daily               # sync, study, trade, publish
+    python -m dossier.daily               # sync, then study, trade and publish every stock
+    python -m dossier.daily --stock MTARTECH   # sync, then just that one stock
     python -m dossier.daily --no-publish  # everything except the MongoDB push
     python -m dossier.daily --variants    # also re-run the rule-variant study (about 2 minutes)
 
-Steps, in order; the run stops at the first failure and says which step:
-  1. Sync        NSE daily files, corporate actions, events, results filings, filing PDFs
+Steps, in order; the run stops at the first failure and says which step.
+Sync runs once; the rest runs once per stock in dossier/universe.py STOCKS:
+  1. Sync        NSE daily files and corporate actions
+     Events      the stock's and its peers' events, results filings, filing PDFs
   2. Peers       how closely each comparison company moves with the stock
   3. Study       the dossier (price, conditions, events, fundamentals), checked against Yahoo
   4. Variants    optional: the pre-registered rule-variant test
@@ -44,20 +47,23 @@ def main():
     ap = argparse.ArgumentParser(prog="python -m dossier.daily")
     ap.add_argument("--no-publish", action="store_true", help="skip the MongoDB push")
     ap.add_argument("--variants", action="store_true", help="also re-run the rule-variant study")
+    ap.add_argument("--stock", choices=list(universe.STOCKS), help="run only this stock (default: all of them)")
     args = ap.parse_args()
 
-    from dossier import run
-    sym = universe.FOCUS
-    steps = [
-        ("Sync", lambda: (run.sync(), __import__("dossier.events", fromlist=["refresh"]).refresh())),
-        ("Peers", run.cmd_peers),
-        ("Study", lambda: run.cmd_build(sym, check_yahoo=True)),
-    ]
-    if args.variants:
-        steps.append(("Variants", run.cmd_variants))
-    steps.append(("Agent", lambda: run.cmd_agent(push=False)))
-    if not args.no_publish:
-        steps.append(("Publish", _publish))
+    from dossier import events, run
+    stocks = [args.stock] if args.stock else list(universe.STOCKS)
+    steps = [("Sync", None, run.sync)]
+    for sym in stocks:
+        steps += [
+            ("Events", sym, events.refresh),
+            ("Peers", sym, run.cmd_peers),
+            ("Study", sym, lambda s=sym: run.cmd_build(s, check_yahoo=True)),
+        ]
+        if args.variants:
+            steps.append(("Variants", sym, run.cmd_variants))
+        steps.append(("Agent", sym, lambda: run.cmd_agent(push=False)))
+        if not args.no_publish:
+            steps.append(("Publish", sym, _publish))
 
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, f"daily_{datetime.now():%Y%m%d_%H%M}.log")
@@ -65,18 +71,22 @@ def main():
         if datetime.now().hour < 18:
             print("Note: before 6pm NSE may not have published today's file yet; today will be picked up on the next run.")
         start = time.time()
-        for n, (name, fn) in enumerate(steps, 1):
+        for n, (name, sym, fn) in enumerate(steps, 1):
+            if sym:
+                universe.use(sym)
+            label = f"{name} {sym}" if sym else name
             t0 = time.time()
-            print(f"\n[{n}/{len(steps)}] {name} ...")
+            print(f"\n[{n}/{len(steps)}] {label} ...")
             try:
                 fn()
             except Exception:
                 traceback.print_exc(file=sys.stdout)
-                print(f"\nStopped: step '{name}' failed. Nothing after it ran. Log: {log_path}")
+                print(f"\nStopped: step '{label}' failed. Nothing after it ran. Log: {log_path}")
                 sys.exit(1)
-            print(f"[{n}/{len(steps)}] {name} done in {time.time() - t0:.0f}s")
-        _signal_summary(sym)
-        print(f"\nAll done in {(time.time() - start) / 60:.1f} minutes. Report: {os.path.join(CACHE_DIR, sym, 'report.html')}")
+            print(f"[{n}/{len(steps)}] {label} done in {time.time() - t0:.0f}s")
+        for sym in stocks:
+            _signal_summary(sym)
+        print(f"\nAll done in {(time.time() - start) / 60:.1f} minutes. Reports in {CACHE_DIR}\\<stock>\\report.html")
         print(f"Log: {log_path}")
 
 

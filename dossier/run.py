@@ -2,6 +2,7 @@
 
     python -m dossier.run sync             # download missing NSE files, corporate actions and event data
     python -m dossier.run build NETWEB     # study one stock; writes dossier.json and report.html
+    python -m dossier.run --stock MTARTECH agent   # any command, for another stock in universe.STOCKS
     python -m dossier.run peers            # peer co-movement screen
     python -m dossier.run check            # audit + Yahoo cross-check for the whole universe
     python -m dossier.run agent            # backtest + advance the paper ledger; updates report.html
@@ -106,7 +107,7 @@ def cmd_agent(push, show="paper"):
             print(f"  Order for the next open: {order['side'].upper()} about {est} shares (last close ₹{px:,.2f})")
         print(f"  Why: {(last['reason'] or '').replace(' | ', chr(10) + '       ') or 'no change'}")
 
-    _write(agent.AGENT_FILE, agent.report_data(bars, start, results, bench, paper_book, paper_eq, state, known))
+    _write(agent.agent_file(), agent.report_data(bars, start, results, bench, paper_book, paper_eq, state, known))
     from dossier import report
     report.render(dossier_path, bars)
 
@@ -145,10 +146,11 @@ def cmd_variants():
 
 def main():
     ap = argparse.ArgumentParser(prog="python -m dossier.run")
+    ap.add_argument("--stock", help="focus stock (default: the first in universe.STOCKS)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("sync")
     b = sub.add_parser("build")
-    b.add_argument("symbol", nargs="?", default=universe.FOCUS)
+    b.add_argument("symbol", nargs="?", default=None)
     b.add_argument("--no-yahoo", action="store_true", help="skip the Yahoo cross-check")
     sub.add_parser("peers")
     sub.add_parser("check")
@@ -159,13 +161,15 @@ def main():
     ag.add_argument("--show", choices=["paper", "backtest"], default="paper",
                     help="which Rs 10 lakh book the dashboard's trades show (default: the paper ledger)")
     args = ap.parse_args()
+    if args.stock:
+        universe.use(args.stock)
 
     if args.cmd == "sync":
         sync()
         from dossier import events
         events.refresh()
     elif args.cmd == "build":
-        cmd_build(args.symbol.upper(), not args.no_yahoo)
+        cmd_build(universe.use(args.symbol) if args.symbol else universe.FOCUS, not args.no_yahoo)
     elif args.cmd == "peers":
         cmd_peers()
     elif args.cmd == "publish":

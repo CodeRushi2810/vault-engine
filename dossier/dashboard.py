@@ -86,6 +86,21 @@ def _weekly(eq):
     return [{"d": d.date().isoformat(), "v": round(float(v), 2)} for d, v in w.items()]
 
 
+def _stock_notes(a):
+    """Caveats that depend on which stock this is. The exit rules were found on NETWEB's group."""
+    if universe.FOCUS == "NETWEB":
+        return [
+            "In-sample: the bad-results exit was found on 2023-2026 data that includes NETWEB's own results.",
+            f"Only {a['trades']} completed trades; one avoided crash (January-February 2025) drives most of the risk improvement.",
+            "Single stock: the result depends on NETWEB having risen about 5x; a falling stock would look very different.",
+        ]
+    return [
+        f"Out-of-sample: the rules were found on NETWEB and its peers and are applied to {universe.FOCUS} unchanged.",
+        f"Only {a['trades']} completed trades; a handful of results days decide the record.",
+        f"Single stock: the result depends on how {universe.FOCUS} itself moved over this window.",
+    ]
+
+
 def _screen(dossier):
     rows = []
     studies = [(dossier.get("what_happens_when") or {}).get("results", []), (dossier.get("events") or {}).get("results", [])]
@@ -177,11 +192,8 @@ def backtest_block(bars, start, results, bench, dossier):
         "headline": {"control_beats_every_strategy": beats, "conclusion": conclusion,
                      "control_return_pct": control, "legacy_reported_return_pct": None,
                      "legacy_win_rate_pct": None, "legacy_hidden_open_unrealized": None},
-        "warnings": study_notes + [
-            "In-sample: the bad-results exit was found on 2023-2026 data that includes NETWEB's own results.",
-            f"Only {a['trades']} completed trades; one avoided crash (January-February 2025) drives most of the risk improvement.",
+        "warnings": study_notes + _stock_notes(a) + [
             "The exit evidence is 'consistent, not yet confirmed': strong on the full sample and the same direction in both halves, but the earlier half alone is not significant.",
-            "Single stock: the result depends on NETWEB having risen about 5x; a falling stock would look very different.",
             "Charges follow a delivery schedule with 5 bps slippage per side; confirm against a real contract note.",
             f"Every config starts with ₹{A.CAPITAL / 1e5:.0f} lakh and only reinvests its own profits; no money is ever added.",
             "The dashboard's trades and cash show the forward paper ledger only (also started at ₹10 lakh); these backtest trades are not in them.",

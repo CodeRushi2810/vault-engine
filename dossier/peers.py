@@ -11,7 +11,8 @@ def _residual(x, m):
     return x - (x.cov(m) / m.var()) * m
 
 
-def screen(focus=universe.FOCUS, candidates=None):
+def screen(focus=None, candidates=None):
+    focus = focus or universe.FOCUS
     candidates = candidates or universe.PEERS + universe.THEME
     stocks = load_stocks([focus] + candidates)
     nifty = load_index_closes()["NIFTY"]["Close"]

@@ -49,8 +49,9 @@ def _result(r):
     }
 
 
-def payload(symbol=universe.FOCUS):
+def payload(symbol=None):
     """Everything the web report needs for one stock, as plain JSON."""
+    symbol = symbol or universe.FOCUS
     from dossier.data import load_stocks
     from dossier.sources import nse_api
 
@@ -85,8 +86,9 @@ def payload(symbol=universe.FOCUS):
     return _clean(doc)
 
 
-def publish_data(symbol=universe.FOCUS):
+def publish_data(symbol=None):
     """Save the stock's report data for the web app (vault_db.dossier_data)."""
+    symbol = symbol or universe.FOCUS
     from dotenv import load_dotenv
     from pymongo import MongoClient
 
@@ -100,7 +102,8 @@ def publish_data(symbol=universe.FOCUS):
     return doc
 
 
-def publish(symbol=universe.FOCUS):
+def publish(symbol=None):
+    symbol = symbol or universe.FOCUS
     from dotenv import load_dotenv
     from pymongo import MongoClient
 

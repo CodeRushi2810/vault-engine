@@ -81,8 +81,9 @@ def round_trip_pct(value):
 
 # ------------------------------------------------------------------ inputs
 
-def inputs(symbol=universe.FOCUS):
+def inputs(symbol=None):
     """Everything the agent may know, indexed by the session it became known."""
+    symbol = symbol or universe.FOCUS
     stocks = load_stocks([symbol])
     bars = stocks[symbol][0]
     idx = load_index_closes()
@@ -376,7 +377,9 @@ def _bench_metrics(eq):
 
 # ------------------------------------------------------------------ paper ledger
 
-PAPER_FILE = os.path.join(CACHE_DIR, universe.FOCUS, "paper_state.json")
+def paper_file():
+    """The focus stock's paper ledger (each stock has its own ₹10 lakh account)."""
+    return os.path.join(CACHE_DIR, universe.FOCUS, "paper_state.json")
 
 
 def _book_to_json(book, start, last):
@@ -401,8 +404,8 @@ def paper_run():
     corrected (which is then visible in the decision log).
     """
     bars, known = inputs()
-    if os.path.exists(PAPER_FILE):
-        with open(PAPER_FILE) as f:
+    if os.path.exists(paper_file()):
+        with open(paper_file()) as f:
             prev = json.load(f)
         start = pd.Timestamp(prev["start"])
     else:
@@ -411,8 +414,8 @@ def paper_run():
     book, eq = simulate(cfg, bars, known, start, log_decisions=True)
     state = _book_to_json(book, start, bars.index[-1])
     state["equity"] = float(eq.iloc[-1])
-    os.makedirs(os.path.dirname(PAPER_FILE), exist_ok=True)
-    with open(PAPER_FILE, "w") as f:
+    os.makedirs(os.path.dirname(paper_file()), exist_ok=True)
+    with open(paper_file(), "w") as f:
         json.dump(state, f, indent=2, default=str)
     return bars, known, book, eq, state, prev
 
@@ -468,7 +471,8 @@ def variant_study(symbols=None):
 
 # ------------------------------------------------------------------ report data
 
-AGENT_FILE = os.path.join(CACHE_DIR, universe.FOCUS, "agent.json")
+def agent_file():
+    return os.path.join(CACHE_DIR, universe.FOCUS, "agent.json")
 
 
 def _trade_json(t, status="CLOSED"):
