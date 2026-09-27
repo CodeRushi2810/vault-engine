@@ -10,7 +10,7 @@ Steps, in order; the run stops at the first failure and says which step:
   3. Study       the dossier (price, conditions, events, fundamentals), checked against Yahoo
   4. Variants    optional: the pre-registered rule-variant test
   5. Agent       advance the paper account, write report.html
-  6. Publish     push the report to MongoDB for the web app
+  6. Publish     push the report data (and a page snapshot) to MongoDB for the web app
 A log of each run is kept in data/dossier/logs/.
 """
 import argparse
@@ -81,9 +81,11 @@ def main():
 
 
 def _publish():
-    from dossier.publish import publish
+    from dossier.publish import publish, publish_data
+    data = publish_data()
+    print(f"Published {data['_id']} report data ({data['bytes'] / 1024:.0f} KB) to MongoDB vault_db.dossier_data")
     doc = publish()
-    print(f"Published {doc['_id']} ({doc['bytes'] / 1024:.0f} KB) to MongoDB vault_db.dossier_reports")
+    print(f"Published {doc['_id']} page snapshot ({doc['bytes'] / 1024:.0f} KB) to MongoDB vault_db.dossier_reports")
 
 
 def _signal_summary(sym):

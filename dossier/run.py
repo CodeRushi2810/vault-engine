@@ -169,7 +169,9 @@ def main():
     elif args.cmd == "peers":
         cmd_peers()
     elif args.cmd == "publish":
-        from dossier.publish import publish
+        from dossier.publish import publish, publish_data
+        data = publish_data()
+        print(f"Published {data['_id']} report data ({data['bytes'] / 1024:.0f} KB) to MongoDB vault_db.dossier_data")
         doc = publish()
         print(f"Published {doc['_id']} ({doc['bytes'] / 1024:.0f} KB) to MongoDB vault_db.dossier_reports")
     elif args.cmd == "check":
